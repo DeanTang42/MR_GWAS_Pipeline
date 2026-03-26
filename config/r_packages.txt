@@ -1,0 +1,7 @@
+data.table
+TwoSampleMR
+MRPRESSO
+mr.raps
+dplyr
+ggplot2
+remotes

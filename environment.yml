@@ -1,0 +1,14 @@
+name: mr-gwas-pipeline
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.8
+  - pip
+  - plink=1.90b6.21
+  - r-base=4.3
+  - pip:
+      - polars==1.8.2
+      - questionary==2.1.0
+      - rich==14.3.3
