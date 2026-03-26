@@ -14,9 +14,10 @@ MR_GWAS_Pipeline/
 ├── bin/
 ├── config/
 ├── data/
+│   ├── Org/
 │   ├── standardized/
-│   ├── exposure/
-│   ├── outcome/
+│   ├── exp/
+│   ├── out/
 │   └── reference/
 ├── docs/
 ├── logs/
@@ -43,9 +44,10 @@ R 包不再由项目自动安装。需要的包名清单见 [config/r_packages.t
 所有常用参数都集中放在 [config/defaults.env](config/defaults.env)：
 
 - `REFERENCE_PANEL`
+- `ORG_DATA_DIR`
 - `STANDARDIZED_OUTPUT_DIR`
-- `EXPOSURE_OUTPUT_DIR`
-- `OUTCOME_OUTPUT_DIR`
+- `EXP_OUTPUT_DIR`
+- `OUT_OUTPUT_DIR`
 - `RESULTS_DIR`
 - `PLINK_BIN`
 - `CLUMP_BFILE`
@@ -68,7 +70,17 @@ R 包请按 [config/r_packages.txt](config/r_packages.txt) 自行安装。
 
 项目不再提供 reference panel 构建脚本。你只需要把自己构建好的 panel 放到 `REFERENCE_PANEL` 指定的位置即可。格式要求见 [docs/reference_panel格式说明.md](docs/reference_panel格式说明.md)。
 
-### 3. 标准化 outcome GWAS
+### 3. 原始 GWAS 的放置位置
+
+建议把原始下载文件放在：
+
+```text
+data/Org/
+```
+
+交互模式下，标准化脚本会优先把这个目录作为输入路径提示。
+
+### 4. 标准化 outcome GWAS
 
 如果不加 `--non-interactive`，脚本会进入交互模式。现在对于 exposure 的 clump 参数也会在交互过程中询问，并自动带出 `config/defaults.env` 里的默认值。
 
@@ -76,7 +88,7 @@ R 包请按 [config/r_packages.txt](config/r_packages.txt) 自行安装。
 bash bin/standardize_gwas.sh \
   --non-interactive \
   --input /path/to/outcome.tsv.gz \
-  --output /home/ding/MR_GWAS_Pipeline/data/outcome/HF.csv \
+  --output /home/ding/MR_GWAS_Pipeline/data/out/HF.csv \
   --output-format mr \
   --mr-role out \
   --mode B \
@@ -96,7 +108,7 @@ bash bin/standardize_gwas.sh \
   --sample-size 344182
 ```
 
-### 4. 标准化 exposure GWAS 并自动 clump
+### 5. 标准化 exposure GWAS 并自动 clump
 
 `--mr-role exp` 会自动执行 `clump_data()`，并使用 `bim_id` 作为 `SNP` 与参考 `.bim` 对接。非 `--non-interactive` 模式下会交互式询问：
 
@@ -133,12 +145,12 @@ bash bin/standardize_gwas.sh \
 如果不显式写 `--output`，脚本会优先使用 `config/defaults.env` 中的输出目录：
 
 - `STANDARDIZED_OUTPUT_DIR`
-- `OUTCOME_OUTPUT_DIR`
-- `EXPOSURE_OUTPUT_DIR`
+- `OUT_OUTPUT_DIR`
+- `EXP_OUTPUT_DIR`
 
-### 5. 运行 MR 分析
+### 6. 运行 MR 分析
 
-将 `EXPOSURE_OUTPUT_DIR` 和 `OUTCOME_OUTPUT_DIR` 对应目录中的文件准备好之后，运行：
+将 `EXP_OUTPUT_DIR` 和 `OUT_OUTPUT_DIR` 对应目录中的文件准备好之后，运行：
 
 ```bash
 bash bin/run_mr.sh EXPO HF
@@ -182,8 +194,9 @@ reference panel 不是拿来直接做 MR 的，而是用来：
 
 项目已经配置好 `.gitignore`，默认不跟踪：
 
-- `data/exposure/`
-- `data/outcome/`
+- `data/Org/`
+- `data/exp/`
+- `data/out/`
 - `data/standardized/`
 - `data/reference/`
 - `results/`

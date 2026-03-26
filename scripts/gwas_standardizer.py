@@ -98,9 +98,10 @@ def _env_int(name: str, default: int) -> int:
 
 DEFAULT_R_LIB_PATH = os.environ.get("MR_PIPELINE_R_LIB_PATH", "/home/ding/R/4.4.1_MR")
 DEFAULT_REFERENCE_PANEL = os.environ.get("MR_PIPELINE_REFERENCE_PANEL", "")
+DEFAULT_ORG_DIR = os.environ.get("MR_PIPELINE_ORG_DIR", "")
 DEFAULT_STANDARDIZED_OUTPUT_DIR = os.environ.get("MR_PIPELINE_STANDARDIZED_OUTPUT_DIR", "")
-DEFAULT_EXPOSURE_OUTPUT_DIR = os.environ.get("MR_PIPELINE_EXPOSURE_DIR", "")
-DEFAULT_OUTCOME_OUTPUT_DIR = os.environ.get("MR_PIPELINE_OUTCOME_DIR", "")
+DEFAULT_EXPOSURE_OUTPUT_DIR = os.environ.get("MR_PIPELINE_EXP_DIR", os.environ.get("MR_PIPELINE_EXPOSURE_DIR", ""))
+DEFAULT_OUTCOME_OUTPUT_DIR = os.environ.get("MR_PIPELINE_OUT_DIR", os.environ.get("MR_PIPELINE_OUTCOME_DIR", ""))
 DEFAULT_CLUMP_PLINK = os.environ.get("MR_PIPELINE_CLUMP_PLINK", "/home/ding/miniconda3/envs/GWAS/bin/plink")
 DEFAULT_CLUMP_BFILE = os.environ.get("MR_PIPELINE_CLUMP_BFILE", "/home/ding/MR_LPA/Ref/g1000_eur/g1000_eur")
 DEFAULT_CLUMP_R2 = _env_float("MR_PIPELINE_CLUMP_R2", 0.1)
@@ -503,6 +504,12 @@ def ask_reference_path() -> str:
 
     default_path = DEFAULT_REFERENCE_PANEL if DEFAULT_REFERENCE_PANEL else ""
     return ask_file_path("📄 请输入参考面板 (Reference Panel) 文件路径:", default=default_path)
+
+
+def ask_input_path() -> str:
+    """交互式获取输入 GWAS 路径，优先提示 Org 目录"""
+    default_path = str(Path(DEFAULT_ORG_DIR)) if DEFAULT_ORG_DIR else ""
+    return ask_file_path("📄 请输入 GWAS 摘要统计文件路径:", default=default_path)
 
 
 def interactive_runtime_options(input_path: str) -> Dict[str, object]:
@@ -1520,7 +1527,7 @@ def main():
             console.print(f"[red]参考面板不存在: {ref_path}[/red]")
             sys.exit(1)
     else:
-        input_path = ask_file_path("📄 请输入 GWAS 摘要统计文件路径:")
+        input_path = ask_input_path()
         ref_path = ask_reference_path()
         runtime = interactive_runtime_options(input_path)
         output_format = str(runtime["output_format"])

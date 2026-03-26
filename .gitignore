@@ -7,10 +7,12 @@ __pycache__/
 .Rproj.user/
 .DS_Store
 
-data/exposure/*
-!data/exposure/.gitkeep
-data/outcome/*
-!data/outcome/.gitkeep
+data/exp/*
+!data/exp/.gitkeep
+data/out/*
+!data/out/.gitkeep
+data/Org/*
+!data/Org/.gitkeep
 data/standardized/*
 !data/standardized/.gitkeep
 data/reference/*

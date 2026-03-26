@@ -62,7 +62,7 @@ print_usage <- function() {
     "  --steiger-pval <num>  Steiger 过滤阈值，默认 0.05\n",
     "  -h, --help            显示帮助\n\n",
     "说明:\n",
-    "  暴露/结局名需与 data/exposure 和 data/outcome 目录下的 .csv 或 .csv.gz 文件名一致(不含后缀)\n",
+    "  暴露/结局名需与 data/exp 和 data/out 目录下的 .csv 或 .csv.gz 文件名一致(不含后缀)\n",
     sep = ""
   )
 }
@@ -91,8 +91,14 @@ suppressPackageStartupMessages({
 # 项目目录配置
 # ============================
 project_dir  <- normalizePath(cli$project_dir, mustWork = FALSE)
-exposure_dir <- Sys.getenv("MR_PIPELINE_EXPOSURE_DIR", unset = file.path(project_dir, "data", "exposure"))
-outcome_dir  <- Sys.getenv("MR_PIPELINE_OUTCOME_DIR", unset = file.path(project_dir, "data", "outcome"))
+exposure_dir <- Sys.getenv(
+  "MR_PIPELINE_EXP_DIR",
+  unset = Sys.getenv("MR_PIPELINE_EXPOSURE_DIR", unset = file.path(project_dir, "data", "exp"))
+)
+outcome_dir  <- Sys.getenv(
+  "MR_PIPELINE_OUT_DIR",
+  unset = Sys.getenv("MR_PIPELINE_OUTCOME_DIR", unset = file.path(project_dir, "data", "out"))
+)
 result_dir   <- Sys.getenv("MR_PIPELINE_RESULTS_DIR", unset = file.path(project_dir, "results"))
 
 # ============================
