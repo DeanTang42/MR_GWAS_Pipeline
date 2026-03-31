@@ -18,7 +18,6 @@ conda activate "${CONDA_ENV}"
 set -u
 
 export MR_PIPELINE_R_LIB_PATH="${R_LIB_PATH:-/home/ding/R/4.4.1_MR}"
-export MR_PIPELINE_REFERENCE_PANEL="${REFERENCE_PANEL:-}"
 export MR_PIPELINE_ORG_DIR="${ORG_DATA_DIR:-${PROJECT_DIR}/data/Org}"
 export MR_PIPELINE_STANDARDIZED_OUTPUT_DIR="${STANDARDIZED_OUTPUT_DIR:-${PROJECT_DIR}/data/standardized}"
 export MR_PIPELINE_EXP_DIR="${EXP_OUTPUT_DIR:-${EXPOSURE_OUTPUT_DIR:-${PROJECT_DIR}/data/exp}}"
@@ -34,17 +33,4 @@ export MR_PIPELINE_CLUMP_POP="${CLUMP_POP:-EUR}"
 
 mkdir -p "${MR_PIPELINE_ORG_DIR}" "${MR_PIPELINE_STANDARDIZED_OUTPUT_DIR}" "${MR_PIPELINE_EXP_DIR}" "${MR_PIPELINE_OUT_DIR}"
 
-args=("$@")
-has_reference=false
-for ((i = 0; i < ${#args[@]}; i++)); do
-    if [[ "${args[i]}" == "--reference" ]]; then
-        has_reference=true
-        break
-    fi
-done
-
-if [[ "${has_reference}" == false && -n "${REFERENCE_PANEL:-}" && -f "${REFERENCE_PANEL}" ]]; then
-    args=(--reference "${REFERENCE_PANEL}" "${args[@]}")
-fi
-
-python "${PROJECT_DIR}/scripts/gwas_standardizer.py" "${args[@]}"
+python "${PROJECT_DIR}/scripts/gwas_standardizer.py" "$@"

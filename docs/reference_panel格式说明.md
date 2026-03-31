@@ -1,5 +1,7 @@
 # Reference Panel 格式说明
 
+> 该文档已弃用。当前 `MR_GWAS_Pipeline` 的标准化流程不再依赖 reference panel，本文件仅保留作历史记录。
+
 这个项目要求你自己准备 reference panel。文件本身可以是 `.tsv` 或 `.tsv.gz`，核心是列名和列语义要满足下面的要求。
 
 ## 1. 必需列

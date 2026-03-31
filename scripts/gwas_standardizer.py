@@ -8,9 +8,8 @@ Date   : 2026-03-09
 Description:
     交互式 GWAS 摘要统计数据标准化工具。
     - 交互式列映射（questionary + rich）
-    - 等位基因对齐（含链翻转、回文位点处理）
+    - 无 reference 的 canonical ID 生成
     - 质量控制（OR→BETA, -log10P→P, 过滤, 去重）
-    - 参考面板强制引入
 
 Usage:
     python gwas_standardizer.py
@@ -65,17 +64,6 @@ CUSTOM_STYLE = Style([
     ("selected", "fg:green"),
 ])
 
-# 互补碱基映射
-COMPLEMENT: Dict[str, str] = {"A": "T", "T": "A", "C": "G", "G": "C"}
-
-# 回文碱基对
-PALINDROMIC_PAIRS = {frozenset({"A", "T"}), frozenset({"C", "G"})}
-
-# EAF 阈值
-EAF_THRESHOLD = 0.15
-EAF_MID_THRESHOLD = 0.10  # |EAF - 0.5| < 0.10 视为中间频率
-
-
 def _env_float(name: str, default: float) -> float:
     value = os.environ.get(name)
     if value is None or value == "":
@@ -97,7 +85,6 @@ def _env_int(name: str, default: int) -> int:
 
 
 DEFAULT_R_LIB_PATH = os.environ.get("MR_PIPELINE_R_LIB_PATH", "/home/ding/R/4.4.1_MR")
-DEFAULT_REFERENCE_PANEL = os.environ.get("MR_PIPELINE_REFERENCE_PANEL", "")
 DEFAULT_ORG_DIR = os.environ.get("MR_PIPELINE_ORG_DIR", "")
 DEFAULT_STANDARDIZED_OUTPUT_DIR = os.environ.get("MR_PIPELINE_STANDARDIZED_OUTPUT_DIR", "")
 DEFAULT_EXPOSURE_OUTPUT_DIR = os.environ.get("MR_PIPELINE_EXP_DIR", os.environ.get("MR_PIPELINE_EXPOSURE_DIR", ""))
@@ -152,7 +139,7 @@ class ColumnMapping:
     allele2_col: str = ""   # ALT / OA / A2
 
     # Mode C 特有：效应方向
-    effect_on: Optional[str] = None  # "A1", "A2", "Unknown"
+    effect_on: Optional[str] = None  # "A1", "A2"
 
     # 统计量
     stat_type: StatType = StatType.BETA
@@ -170,40 +157,19 @@ class ColumnMapping:
 
 
 @dataclass
-class AlignmentStats:
-    """对齐统计"""
+class ProcessingStats:
+    """标准化统计"""
     total_input: int = 0
-    matched: int = 0
-    swapped: int = 0
-    flipped: int = 0
-    flipped_swapped: int = 0
-    dropped_mismatch: int = 0
-    dropped_ambiguous_palindromic: int = 0
-    dropped_unresolved_mode_c: int = 0
     qc_failed: int = 0
     duplicates_removed: int = 0
-    not_in_ref: int = 0
+    maf_without_eaf: int = 0
+    eaf_missing: int = 0
     total_output: int = 0
 
 
 # ─────────────────────────────────────────────────────────────
 # 工具函数
 # ─────────────────────────────────────────────────────────────
-def complement_base(base: str) -> str:
-    """返回互补碱基"""
-    return COMPLEMENT.get(base.upper(), "N")
-
-
-def complement_alleles(a1: str, a2: str) -> Tuple[str, str]:
-    """返回互补碱基对"""
-    return complement_base(a1), complement_base(a2)
-
-
-def is_palindromic(a1: str, a2: str) -> bool:
-    """判断是否为回文位点 (A/T 或 C/G)"""
-    return frozenset({a1.upper(), a2.upper()}) in PALINDROMIC_PAIRS
-
-
 def make_sort_snpid(chrom: str, pos: str, a1: str, a2: str) -> str:
     """生成标准化 Sort_SNPID (碱基字母排序)"""
     a1, a2 = a1.upper(), a2.upper()
@@ -214,8 +180,8 @@ def make_sort_snpid(chrom: str, pos: str, a1: str, a2: str) -> str:
 
 
 def make_bim_id(chrom: str, pos: str, a1: str, a2: str) -> str:
-    """生成与 BIM 一致的字典序 ID: CHR_POS_A1_A2"""
-    return make_sort_snpid(chrom, pos, a1, a2).replace(":", "_")
+    """生成与 BIM 一致的字典序 ID: CHR:POS:A1:A2"""
+    return make_sort_snpid(chrom, pos, a1, a2)
 
 
 def detect_separator(filepath: str) -> str:
@@ -302,10 +268,10 @@ def derive_default_output_path(
 def parse_args() -> argparse.Namespace:
     """解析命令行参数，支持交互式和非交互式两种模式"""
     parser = argparse.ArgumentParser(
-        description="GWAS 摘要统计数据标准化与等位基因对齐工具",
+        description="GWAS 摘要统计数据标准化工具（无 reference 版本）",
     )
     parser.add_argument("--input", help="输入 GWAS 摘要统计文件")
-    parser.add_argument("--reference", help="参考面板文件")
+    parser.add_argument("--reference", help="已废弃，当前版本不再使用 reference panel")
     parser.add_argument("--output", help="输出文件路径")
     parser.add_argument(
         "--output-format",
@@ -319,7 +285,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pos-col", help="位置列名")
     parser.add_argument("--allele1-col", help="等位基因 1 列名")
     parser.add_argument("--allele2-col", help="等位基因 2 列名")
-    parser.add_argument("--effect-on", choices=["A1", "A2", "Unknown"], help="Mode C 时效应作用在哪个等位基因上")
+    parser.add_argument("--effect-on", choices=["A1", "A2", "Unknown"], help="Mode C 时效应作用在哪个等位基因上；Unknown 在无 reference 模式下不支持")
     parser.add_argument("--stat-type", choices=[s.value for s in StatType], help="统计量类型: BETA/OR")
     parser.add_argument("--stat-col", help="效应统计量列名")
     parser.add_argument("--se-col", help="标准误列名")
@@ -390,7 +356,6 @@ def build_mapping_from_args(args: argparse.Namespace) -> ColumnMapping:
     """根据命令行参数构建列映射"""
     required = [
         ("--input", args.input),
-        ("--reference", args.reference),
         ("--mode", args.mode),
         ("--chr-col", args.chr_col),
         ("--pos-col", args.pos_col),
@@ -408,8 +373,15 @@ def build_mapping_from_args(args: argparse.Namespace) -> ColumnMapping:
         console.print(f"[red]非交互模式缺少必要参数: {', '.join(missing)}[/red]")
         sys.exit(1)
 
+    if args.reference:
+        console.print("[yellow]--reference 已废弃，当前版本将忽略该参数。[/yellow]")
+
     if args.mode == AlleleMode.A1_A2.value and args.effect_on is None:
-        console.print("[red]Mode C 需要提供 --effect-on (A1/A2/Unknown)[/red]")
+        console.print("[red]Mode C 需要提供 --effect-on (A1/A2)[/red]")
+        sys.exit(1)
+
+    if args.mode == AlleleMode.A1_A2.value and args.effect_on == "Unknown":
+        console.print("[red]Mode C 的 Unknown 方向在无 reference 模式下无法可靠解析，请显式指定 A1 或 A2。[/red]")
         sys.exit(1)
 
     if args.mode != AlleleMode.A1_A2.value and args.effect_on is not None:
@@ -489,21 +461,6 @@ def ask_text(prompt: str, default: str = "") -> str:
         console.print("[red]操作已取消[/red]")
         sys.exit(0)
     return answer.strip()
-
-
-def ask_reference_path() -> str:
-    """交互式获取参考面板路径，优先使用 config 默认值"""
-    if DEFAULT_REFERENCE_PANEL and os.path.isfile(DEFAULT_REFERENCE_PANEL):
-        use_default = questionary.confirm(
-            f"📄 使用 config 中的参考面板?\n{DEFAULT_REFERENCE_PANEL}",
-            default=True,
-            style=CUSTOM_STYLE,
-        ).ask()
-        if use_default:
-            return DEFAULT_REFERENCE_PANEL
-
-    default_path = DEFAULT_REFERENCE_PANEL if DEFAULT_REFERENCE_PANEL else ""
-    return ask_file_path("📄 请输入参考面板 (Reference Panel) 文件路径:", default=default_path)
 
 
 def ask_input_path() -> str:
@@ -604,7 +561,7 @@ def interactive_mapping(df: pl.DataFrame) -> ColumnMapping:
 
     console.print(Panel.fit(
         "[bold cyan]🧬 GWAS 摘要统计数据标准化工具[/bold cyan]\n"
-        "[dim]交互式列名映射 & 等位基因对齐[/dim]",
+        "[dim]交互式列名映射 & 无 reference 标准化[/dim]",
         border_style="cyan",
     ))
 
@@ -653,7 +610,6 @@ def interactive_mapping(df: pl.DataFrame) -> ColumnMapping:
             choices=[
                 questionary.Choice("A1 (Allele1)", value="A1"),
                 questionary.Choice("A2 (Allele2)", value="A2"),
-                questionary.Choice("Unknown (将通过频率反推)", value="Unknown"),
             ],
             style=CUSTOM_STYLE,
         ).ask()
@@ -745,7 +701,7 @@ def display_mapping_summary(mapping: ColumnMapping):
     table.add_row("等位基因 2", mapping.allele2_col)
 
     if mapping.allele_mode == AlleleMode.A1_A2:
-        table.add_row("效应方向", mapping.effect_on or "Unknown")
+        table.add_row("效应方向", mapping.effect_on or "(未设置)")
 
     table.add_row("统计量类型", mapping.stat_type.value)
     table.add_row("统计量列", mapping.stat_col)
@@ -893,88 +849,6 @@ def transform_and_qc(df: pl.DataFrame, mapping: ColumnMapping) -> Tuple[pl.DataF
 # ─────────────────────────────────────────────────────────────
 # 等位基因对齐算法
 # ─────────────────────────────────────────────────────────────
-def load_reference_panel(filepath: str) -> pl.DataFrame:
-    """加载参考面板并生成 Sort_SNPID"""
-    sep = detect_separator(filepath)
-    console.print(f"[cyan]🔧 正在加载参考面板: {filepath}[/cyan]")
-
-    ref = pl.read_csv(
-        filepath,
-        separator=sep,
-        infer_schema_length=10000,
-        truncate_ragged_lines=True,
-        ignore_errors=True,
-    )
-
-    # 标准化列名（不区分大小写匹配）
-    col_map = {}
-    for c in ref.columns:
-        cl = c.upper().strip()
-        if cl in ("CHR", "#CHR", "CHROM", "#CHROM"):
-            col_map[c] = "REF_CHR"
-        elif cl in ("POS", "BP", "POSITION"):
-            col_map[c] = "REF_POS"
-        elif cl in ("REF", "A1", "ALLELE1"):
-            col_map[c] = "REF_REF"
-        elif cl in ("ALT", "A2", "ALLELE2"):
-            col_map[c] = "REF_ALT"
-        elif cl in ("AF", "MAF", "A1F", "FRQ", "FREQ", "EAF"):
-            col_map[c] = "REF_AF"
-        elif cl in ("RSID", "ID", "SNP_ID"):
-            col_map[c] = "REF_RSID"
-
-    ref = ref.rename(col_map)
-
-    # 确保必要列存在
-    required = ["REF_CHR", "REF_POS", "REF_REF", "REF_ALT", "REF_AF"]
-    missing = [c for c in required if c not in ref.columns]
-    if missing:
-        console.print(f"[red]参考面板缺少必要列: {missing}[/red]")
-        console.print(f"[dim]当前列: {ref.columns}[/dim]")
-        sys.exit(1)
-
-    # 类型标准化
-    ref = ref.with_columns([
-        pl.col("REF_CHR").cast(pl.Utf8).str.replace("chr", "").str.strip_chars(),
-        pl.col("REF_POS").cast(pl.Utf8).str.strip_chars(),
-        pl.col("REF_REF").cast(pl.Utf8).str.to_uppercase().str.strip_chars(),
-        pl.col("REF_ALT").cast(pl.Utf8).str.to_uppercase().str.strip_chars(),
-        pl.col("REF_AF").cast(pl.Float64, strict=False),
-    ])
-
-    # 生成 Sort_SNPID
-    ref = ref.with_columns([
-        pl.struct(["REF_CHR", "REF_POS", "REF_REF", "REF_ALT"])
-        .map_elements(
-            lambda row: make_sort_snpid(
-                str(row["REF_CHR"]), str(row["REF_POS"]),
-                str(row["REF_REF"]), str(row["REF_ALT"])
-            ),
-            return_dtype=pl.Utf8,
-        )
-        .alias("REF_SORT_SNPID"),
-        pl.struct(["REF_CHR", "REF_POS", "REF_REF", "REF_ALT"])
-        .map_elements(
-            lambda row: make_bim_id(
-                str(row["REF_CHR"]), str(row["REF_POS"]),
-                str(row["REF_REF"]), str(row["REF_ALT"])
-            ),
-            return_dtype=pl.Utf8,
-        )
-        .alias("REF_BIM_ID"),
-    ])
-
-    # 去重（保留第一条）
-    ref = ref.unique(subset=["REF_SORT_SNPID"], keep="first")
-
-    select_cols = ["REF_SORT_SNPID", "REF_BIM_ID", "REF_CHR", "REF_POS", "REF_REF", "REF_ALT", "REF_AF"]
-    if "REF_RSID" in ref.columns:
-        select_cols.append("REF_RSID")
-
-    console.print(f"  ✅ 参考面板加载完成: {ref.height:,} 个变异位点\n")
-    return ref.select(select_cols)
-
-
 def resolve_effect_allele(df: pl.DataFrame, mapping: ColumnMapping) -> pl.DataFrame:
     """
     根据等位基因模式，统一列名为 _Aeff (效应等位基因) 和 _Aref (非效应等位基因)。
@@ -1010,260 +884,52 @@ def resolve_effect_allele(df: pl.DataFrame, mapping: ColumnMapping) -> pl.DataFr
                 pl.col("_A1").alias("_Aref"),
             ])
             df = add_frequency_columns(df, mapping, flip_eaf=True)
-        else:  # Unknown - 先保留原始，后续通过参考面板反推
-            df = df.with_columns([
-                pl.col("_A1").alias("_Aeff"),
-                pl.col("_A2").alias("_Aref"),
-            ])
-            df = add_frequency_columns(df, mapping)
+        else:
+            console.print("[red]Mode C 的 Unknown 方向在无 reference 模式下不支持。[/red]")
+            sys.exit(1)
 
     return df
 
 
-def align_alleles(
-    df: pl.DataFrame,
-    ref: pl.DataFrame,
-    mapping: ColumnMapping,
-) -> Tuple[pl.DataFrame, AlignmentStats]:
-    """
-    核心等位基因对齐逻辑。
-    返回 (对齐后的 DataFrame, 对齐统计)
-    """
-    stats = AlignmentStats()
-    stats.total_input = df.height
+def canonicalize_variants(df: pl.DataFrame) -> Tuple[pl.DataFrame, ProcessingStats]:
+    """生成无 reference 版本的 canonical ID，并按位点去重。"""
+    stats = ProcessingStats(total_input=df.height)
 
-    # 生成 Sort_SNPID
-    df = df.with_columns(
-        pl.struct(["_CHR", "_POS", "_Aeff", "_Aref"])
-        .map_elements(
-            lambda row: make_sort_snpid(
-                str(row["_CHR"]), str(row["_POS"]),
-                str(row["_Aeff"]), str(row["_Aref"])
-            ),
-            return_dtype=pl.Utf8,
-        )
-        .alias("_SORT_SNPID")
+    sort_a1 = (
+        pl.when(pl.col("_Aeff") <= pl.col("_Aref"))
+        .then(pl.col("_Aeff"))
+        .otherwise(pl.col("_Aref"))
+    )
+    sort_a2 = (
+        pl.when(pl.col("_Aeff") <= pl.col("_Aref"))
+        .then(pl.col("_Aref"))
+        .otherwise(pl.col("_Aeff"))
     )
 
-    # ── 去重：保留 P 值最小的 ──
+    df = df.with_columns([
+        sort_a1.alias("_SORT_A1"),
+        sort_a2.alias("_SORT_A2"),
+    ]).with_columns(
+        (
+            pl.col("_CHR")
+            + pl.lit(":")
+            + pl.col("_POS")
+            + pl.lit(":")
+            + pl.col("_SORT_A1")
+            + pl.lit(":")
+            + pl.col("_SORT_A2")
+        ).alias("_SORT_SNPID")
+    ).with_columns(
+        pl.col("_SORT_SNPID").alias("_BIM_ID")
+    )
+
     before_dedup = df.height
     df = df.sort("_P").unique(subset=["_SORT_SNPID"], keep="first")
     stats.duplicates_removed = before_dedup - df.height
-
-    # ── 与参考面板连接 ──
-    df = df.join(ref, left_on="_SORT_SNPID", right_on="REF_SORT_SNPID", how="left")
-
-    # 未在参考面板中找到的位点
-    not_in_ref = df.filter(pl.col("REF_REF").is_null())
-    stats.not_in_ref = not_in_ref.height
-    df = df.filter(pl.col("REF_REF").is_not_null())
-
-    # ── Mode C Unknown 反推 ──
-    if mapping.allele_mode == AlleleMode.A1_A2 and mapping.effect_on == "Unknown":
-        df, unresolved_count = _resolve_mode_c(df)
-        stats.dropped_unresolved_mode_c = unresolved_count
-
-    # ── 逐行对齐判定 ──
-    # 使用 polars map_elements 进行判定
-    result = df.with_columns(
-        pl.struct([
-            "_Aeff", "_Aref", "REF_REF", "REF_ALT", "REF_AF",
-            "_EAF", "_STAT",
-        ]).map_elements(
-            _classify_alignment,
-            return_dtype=pl.Utf8,
-        ).alias("_ALIGN_ACTION")
-    )
-
-    # 统计各种结果
-    action_counts = result.group_by("_ALIGN_ACTION").len().to_dict(as_series=False)
-    action_map = dict(zip(action_counts["_ALIGN_ACTION"], action_counts["len"]))
-    stats.matched = action_map.get("match", 0)
-    stats.swapped = action_map.get("swap", 0)
-    stats.flipped = action_map.get("flip", 0)
-    stats.flipped_swapped = action_map.get("flip_swap", 0)
-    stats.dropped_mismatch = action_map.get("drop_mismatch", 0)
-    stats.dropped_ambiguous_palindromic = action_map.get("drop_ambiguous", 0)
-
-    # ── 应用对齐操作 ──
-    # 过滤掉需要剔除的行
-    result = result.filter(
-        pl.col("_ALIGN_ACTION").is_in(["match", "swap", "flip", "flip_swap"])
-    )
-
-    # 对 swap 和 flip_swap 的行执行 BETA 取反和 EAF 翻转
-    result = result.with_columns([
-        pl.when(pl.col("_ALIGN_ACTION").is_in(["swap", "flip_swap"]))
-          .then(-pl.col("_STAT"))
-          .otherwise(pl.col("_STAT"))
-          .alias("_STAT"),
-        pl.when(pl.col("_ALIGN_ACTION").is_in(["swap", "flip_swap"]))
-          .then(
-              pl.when(pl.col("_EAF").is_not_null())
-                .then(1.0 - pl.col("_EAF"))
-                .otherwise(pl.col("_EAF"))
-          )
-          .otherwise(pl.col("_EAF"))
-          .alias("_EAF"),
-    ])
-
-    if "_MAF" in result.columns:
-        result = result.with_columns(
-            pl.when(pl.col("_EAF").is_not_null())
-              .then(pl.col("_EAF"))
-              .otherwise(
-                  pl.when(pl.col("_MAF").is_not_null() & pl.col("REF_AF").is_not_null())
-                    .then(
-                        pl.when(pl.col("REF_AF") <= 0.5)
-                          .then(pl.col("_MAF"))
-                          .otherwise(1.0 - pl.col("_MAF"))
-                    )
-                    .otherwise(pl.lit(None).cast(pl.Float64))
-              )
-              .alias("_EAF")
-        )
-
-    stats.total_output = result.height
-    return result, stats
-
-
-def _classify_alignment(row: dict) -> str:
-    """
-    对单行数据进行对齐分类。
-    返回: match, swap, flip, flip_swap, drop_mismatch, drop_ambiguous
-    """
-    a_eff = str(row["_Aeff"]).upper()
-    a_ref = str(row["_Aref"]).upper()
-    p_ref = str(row["REF_REF"]).upper()
-    p_alt = str(row["REF_ALT"]).upper()
-    ref_af = row["REF_AF"]
-    eaf = row["_EAF"]
-
-    # 检查是否为回文位点
-    palindromic = is_palindromic(a_eff, a_ref)
-
-    if palindromic:
-        return _handle_palindromic(a_eff, a_ref, p_ref, p_alt, ref_af, eaf)
-
-    # ── 直接匹配 ──
-    if a_ref == p_ref and a_eff == p_alt:
-        return "match"
-
-    # ── 交换 ──
-    if a_ref == p_alt and a_eff == p_ref:
-        return "swap"
-
-    # ── 互补链匹配 ──
-    c_eff = complement_base(a_eff)
-    c_ref = complement_base(a_ref)
-
-    if c_ref == p_ref and c_eff == p_alt:
-        return "flip"
-
-    if c_ref == p_alt and c_eff == p_ref:
-        return "flip_swap"
-
-    return "drop_mismatch"
-
-
-def _handle_palindromic(
-    a_eff: str, a_ref: str,
-    p_ref: str, p_alt: str,
-    ref_af: float, eaf: float,
-) -> str:
-    """处理回文位点 (A/T, C/G)"""
-    if eaf is None or ref_af is None:
-        return "drop_ambiguous"
-
-    try:
-        eaf = float(eaf)
-        ref_af = float(ref_af)
-    except (ValueError, TypeError):
-        return "drop_ambiguous"
-
-    # 中间频率，无法区分
-    if abs(eaf - 0.5) < EAF_MID_THRESHOLD:
-        return "drop_ambiguous"
-
-    # 方向一致
-    if abs(eaf - ref_af) < EAF_THRESHOLD:
-        if a_ref == p_ref and a_eff == p_alt:
-            return "match"
-        elif a_ref == p_alt and a_eff == p_ref:
-            return "swap"
-
-    # 方向相反
-    if abs((1 - eaf) - ref_af) < EAF_THRESHOLD:
-        if a_ref == p_ref and a_eff == p_alt:
-            return "swap"
-        elif a_ref == p_alt and a_eff == p_ref:
-            return "match"
-
-    return "drop_ambiguous"
-
-
-def _resolve_mode_c(df: pl.DataFrame) -> Tuple[pl.DataFrame, int]:
-    """
-    Mode C Unknown 情况下，通过参考面板频率反推效应等位基因方向。
-    """
-    df = df.with_columns(
-        pl.struct(["_Aeff", "_Aref", "_EAF", "REF_AF", "_STAT"])
-        .map_elements(
-            lambda row: _mode_c_resolve_row(row),
-            return_dtype=pl.Struct({
-                "_Aeff": pl.Utf8,
-                "_Aref": pl.Utf8,
-                "_EAF": pl.Float64,
-                "_STAT": pl.Float64,
-                "_resolved": pl.Boolean,
-            }),
-        )
-        .alias("_resolved_struct")
-    )
-
-    unresolved_mask = ~pl.col("_resolved_struct").struct.field("_resolved")
-    unresolved_count = df.filter(unresolved_mask).height
-
-    df = df.filter(~unresolved_mask).with_columns([
-        pl.col("_resolved_struct").struct.field("_Aeff").alias("_Aeff"),
-        pl.col("_resolved_struct").struct.field("_Aref").alias("_Aref"),
-        pl.col("_resolved_struct").struct.field("_EAF").alias("_EAF"),
-        pl.col("_resolved_struct").struct.field("_STAT").alias("_STAT"),
-    ]).drop("_resolved_struct")
-
-    return df, unresolved_count
-
-
-def _mode_c_resolve_row(row: dict) -> dict:
-    """单行 Mode C 反推"""
-    a_eff = str(row["_Aeff"])
-    a_ref = str(row["_Aref"])
-    eaf = row["_EAF"]
-    ref_af = row["REF_AF"]
-    stat = row["_STAT"]
-
-    if eaf is None or ref_af is None:
-        return {"_Aeff": a_eff, "_Aref": a_ref, "_EAF": eaf, "_STAT": stat, "_resolved": False}
-
-    try:
-        eaf = float(eaf)
-        ref_af = float(ref_af)
-    except (ValueError, TypeError):
-        return {"_Aeff": a_eff, "_Aref": a_ref, "_EAF": eaf, "_STAT": stat, "_resolved": False}
-
-    # 比较频率，判断 A1 vs A2 谁是效应碱基
-    diff_a1 = abs(eaf - ref_af)
-    diff_a2 = abs((1 - eaf) - ref_af)
-
-    if diff_a1 < EAF_THRESHOLD and diff_a1 < diff_a2:
-        # A1 的频率更接近 REF_ALT 的频率 → A1 就是效应等位基因，保持不变
-        return {"_Aeff": a_eff, "_Aref": a_ref, "_EAF": eaf, "_STAT": stat, "_resolved": True}
-    elif diff_a2 < EAF_THRESHOLD and diff_a2 < diff_a1:
-        # A2 的频率更接近 → 翻转
-        return {"_Aeff": a_ref, "_Aref": a_eff, "_EAF": 1 - eaf, "_STAT": -stat, "_resolved": True}
-    else:
-        # 无法区分
-        return {"_Aeff": a_eff, "_Aref": a_ref, "_EAF": eaf, "_STAT": stat, "_resolved": False}
+    stats.maf_without_eaf = df.filter(pl.col("_MAF").is_not_null() & pl.col("_EAF").is_null()).height
+    stats.eaf_missing = df.filter(pl.col("_EAF").is_null()).height
+    stats.total_output = df.height
+    return df, stats
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1279,21 +945,11 @@ def write_output(
 ):
     """写出标准化结果文件"""
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    bim_id = pl.col("REF_BIM_ID")
-    standardized_id = (
-        pl.col("_CHR")
-        + pl.lit(":")
-        + pl.col("_POS")
-        + pl.lit(":")
-        + pl.col("REF_REF")
-        + pl.lit(":")
-        + pl.col("REF_ALT")
-    )
+    bim_id = pl.col("_BIM_ID")
+    standardized_id = pl.col("_SORT_SNPID")
     rsid_expr: Optional[pl.Expr] = None
     if "_SNP" in df.columns:
         rsid_expr = pl.col("_SNP")
-    elif "REF_RSID" in df.columns:
-        rsid_expr = pl.col("REF_RSID")
 
     # 构建最终输出列
     if output_format == "mr_raw":
@@ -1302,8 +958,8 @@ def write_output(
             standardized_id.alias("variant_id"),
             pl.col("_CHR").alias("chromosome"),
             pl.col("_POS").alias("base_pair_location"),
-            pl.col("REF_ALT").alias("effect_allele"),
-            pl.col("REF_REF").alias("other_allele"),
+            pl.col("_Aeff").alias("effect_allele"),
+            pl.col("_Aref").alias("other_allele"),
             pl.col("_EAF").alias("effect_allele_frequency"),
             pl.col("_STAT").alias("beta"),
             pl.col("_SE").alias("standard_error"),
@@ -1325,12 +981,15 @@ def write_output(
         if rsid_expr is not None:
             out_cols.append(rsid_expr.alias("RSID"))
         out_cols.extend([
-            pl.col("REF_REF").alias("REF"),
-            pl.col("REF_ALT").alias("ALT"),
+            pl.col("_SORT_A1").alias("ALLELE1"),
+            pl.col("_SORT_A2").alias("ALLELE2"),
+            pl.col("_Aeff").alias("EFFECT_ALLELE"),
+            pl.col("_Aref").alias("OTHER_ALLELE"),
             pl.col("_STAT").alias("BETA"),
             pl.col("_SE").alias("SE"),
             pl.col("_P").alias("P"),
             pl.col("_EAF").alias("EAF"),
+            pl.col("_MAF").alias("MAF"),
         ])
 
     output = df.select(out_cols)
@@ -1420,11 +1079,9 @@ def format_mr_output(
 
 
 def generate_report(
-    stats: AlignmentStats,
-    qc_failed: int,
+    stats: ProcessingStats,
     output_path: str,
     input_path: str,
-    ref_path: str,
 ):
     """生成审计报告"""
     report_path = (
@@ -1441,25 +1098,17 @@ def generate_report(
 
     lines = [
         "=" * 60,
-        "GWAS Standardizer - 对齐审计报告",
+        "GWAS Standardizer - 无 reference 审计报告",
         "=" * 60,
         f"时间: {timestamp}",
         f"输入文件: {input_path}",
-        f"参考面板: {ref_path}",
         f"输出文件: {output_path}",
         "-" * 60,
         f"初始输入变异总数:           {stats.total_input:>10,}",
-        f"QC 不达标剔除:              {qc_failed:>10,}",
+        f"QC 不达标剔除:              {stats.qc_failed:>10,}",
         f"去重剔除:                   {stats.duplicates_removed:>10,}",
-        f"参考面板未找到:             {stats.not_in_ref:>10,}",
-        f"Mode C 未解析剔除:          {stats.dropped_unresolved_mode_c:>10,}",
-        "-" * 60,
-        f"对齐成功 (方向一致):        {stats.matched:>10,}",
-        f"效应反转 (Swapped):         {stats.swapped:>10,}",
-        f"链翻转 (Strand Flipped):    {stats.flipped:>10,}",
-        f"链翻转+效应反转:            {stats.flipped_swapped:>10,}",
-        f"碱基不匹配剔除:             {stats.dropped_mismatch:>10,}",
-        f"回文位点歧义剔除:           {stats.dropped_ambiguous_palindromic:>10,}",
+        f"仅有 MAF 无法转 EAF:        {stats.maf_without_eaf:>10,}",
+        f"EAF 缺失位点数:             {stats.eaf_missing:>10,}",
         "-" * 60,
         f"最终输出变异总数:           {stats.total_output:>10,}",
         "=" * 60,
@@ -1468,7 +1117,7 @@ def generate_report(
     report_text = "\n".join(lines)
 
     # 打印到终端
-    console.print(Panel(report_text, title="📊 对齐审计报告", border_style="green"))
+    console.print(Panel(report_text, title="📊 标准化审计报告", border_style="green"))
 
     # 写入日志文件
     with open(report_path, "w") as f:
@@ -1486,7 +1135,7 @@ def main():
 
     console.print(Panel.fit(
         "[bold magenta]🧬 GWAS Summary Statistics Standardizer[/bold magenta]\n"
-        "[dim]GWAS 摘要统计数据标准化与等位基因对齐工具[/dim]\n"
+        "[dim]GWAS 摘要统计数据标准化与 canonical 位点 ID 工具[/dim]\n"
         "[dim]Version 1.0 | hg19[/dim]",
         border_style="magenta",
     ))
@@ -1510,7 +1159,6 @@ def main():
     if cli_mode:
         mapping = build_mapping_from_args(args)
         input_path = args.input or ""
-        ref_path = args.reference or ""
         if output_format == "mr" and mr_role is None:
             console.print("[red]--output-format mr 时必须提供 --mr-role out/exp[/red]")
             sys.exit(1)
@@ -1523,12 +1171,8 @@ def main():
         if not os.path.isfile(input_path):
             console.print(f"[red]输入文件不存在: {input_path}[/red]")
             sys.exit(1)
-        if not os.path.isfile(ref_path):
-            console.print(f"[red]参考面板不存在: {ref_path}[/red]")
-            sys.exit(1)
     else:
         input_path = ask_input_path()
-        ref_path = ask_reference_path()
         runtime = interactive_runtime_options(input_path)
         output_format = str(runtime["output_format"])
         mr_role = runtime["mr_role"]
@@ -1578,15 +1222,18 @@ def main():
     console.print("[cyan]🔧 正在解析效应等位基因方向...[/cyan]")
     df_clean = resolve_effect_allele(df_clean, mapping)
 
-    # ── Step 6: 加载参考面板 ──
-    ref = load_reference_panel(ref_path)
-
-    # ── Step 7: 等位基因对齐 ──
-    console.print("[cyan]🔧 正在执行等位基因对齐...[/cyan]")
-    df_aligned, stats = align_alleles(df_clean, ref, mapping)
+    # ── Step 6: 生成 canonical ID & 去重 ──
+    console.print("[cyan]🔧 正在生成 canonical 位点 ID...[/cyan]")
+    df_aligned, stats = canonicalize_variants(df_clean)
     stats.qc_failed = qc_failed
 
-    # ── Step 8: 输出 ──
+    if stats.maf_without_eaf > 0:
+        console.print(
+            f"[yellow]⚠ 检测到 {stats.maf_without_eaf:,} 个位点只有 MAF，"
+            "在无 reference 模式下无法可靠转换为 EAF；MR 输出中的 effect_allele_frequency 将为空。[/yellow]\n"
+        )
+
+    # ── Step 7: 输出 ──
     if output_format == "mr":
         console.print("[cyan]🔧 正在写出 MR 中间结果...[/cyan]")
         tmp_file = tempfile.NamedTemporaryFile(
@@ -1635,8 +1282,8 @@ def main():
             sample_size=sample_size,
         )
 
-    # ── Step 9: 报告 ──
-    generate_report(stats, qc_failed, output_path, input_path, ref_path)
+    # ── Step 8: 报告 ──
+    generate_report(stats, output_path, input_path)
 
     console.print("[bold green]🎉 标准化流程完成！[/bold green]\n")
 
