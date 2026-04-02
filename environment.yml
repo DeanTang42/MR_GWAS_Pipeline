@@ -1,4 +1,4 @@
-name: mrpipeline
+name: mr
 channels:
   - conda-forge
   - bioconda
