@@ -64,6 +64,99 @@ CUSTOM_STYLE = Style([
     ("selected", "fg:green"),
 ])
 
+QUESTIONARY_FALLBACK_WARNED = False
+
+
+def _cancel_interaction() -> None:
+    console.print("[red]操作已取消[/red]")
+    sys.exit(0)
+
+
+def _warn_questionary_fallback(exc: Exception) -> None:
+    global QUESTIONARY_FALLBACK_WARNED
+    if QUESTIONARY_FALLBACK_WARNED:
+        return
+    console.print(
+        "[yellow]检测到 questionary 菜单不可用，已自动回退为纯文本输入模式。[/yellow]"
+    )
+    console.print(f"[dim]{exc.__class__.__name__}: {exc}[/dim]")
+    QUESTIONARY_FALLBACK_WARNED = True
+
+
+def _plain_text_input(prompt: str, default: str = "") -> str:
+    prompt_text = prompt
+    if default:
+        prompt_text += f" [默认: {default}]"
+    prompt_text += " "
+    try:
+        answer = input(prompt_text)
+    except (EOFError, KeyboardInterrupt):
+        _cancel_interaction()
+    answer = answer.strip()
+    return answer or default
+
+
+def _normalize_choice(choice) -> Tuple[str, object]:
+    if hasattr(choice, "value"):
+        label = getattr(choice, "title", None)
+        value = choice.value
+        return str(label if label is not None else value), value
+    return str(choice), choice
+
+
+def ask_select(prompt: str, choices: List[object]):
+    try:
+        answer = questionary.select(
+            prompt,
+            choices=choices,
+            style=CUSTOM_STYLE,
+        ).ask()
+        if answer is None:
+            _cancel_interaction()
+        return answer
+    except Exception as exc:
+        _warn_questionary_fallback(exc)
+
+    normalized_choices = [_normalize_choice(choice) for choice in choices]
+    console.print(f"[bold cyan]{prompt}[/bold cyan]")
+    for idx, (label, _) in enumerate(normalized_choices, start=1):
+        console.print(f"  {idx}. {label}")
+
+    while True:
+        raw = _plain_text_input("请输入编号:", default="1")
+        try:
+            selected_idx = int(raw)
+        except ValueError:
+            console.print(f"[red]请输入 1 到 {len(normalized_choices)} 之间的数字。[/red]")
+            continue
+        if 1 <= selected_idx <= len(normalized_choices):
+            return normalized_choices[selected_idx - 1][1]
+        console.print(f"[red]请输入 1 到 {len(normalized_choices)} 之间的数字。[/red]")
+
+
+def ask_confirm(prompt: str, default: bool = True) -> bool:
+    try:
+        answer = questionary.confirm(
+            prompt,
+            default=default,
+            style=CUSTOM_STYLE,
+        ).ask()
+        if answer is None:
+            _cancel_interaction()
+        return bool(answer)
+    except Exception as exc:
+        _warn_questionary_fallback(exc)
+
+    default_value = "y" if default else "n"
+    while True:
+        answer = _plain_text_input(f"{prompt} [y/n]:", default=default_value).lower()
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        console.print("[red]请输入 y 或 n。[/red]")
+
+
 def _env_float(name: str, default: float) -> float:
     value = os.environ.get(name)
     if value is None or value == "":
@@ -422,14 +515,17 @@ def display_preview(df: pl.DataFrame):
 def ask_file_path(prompt: str, must_exist: bool = True, default: str = "") -> str:
     """交互式询问文件路径"""
     while True:
-        path = questionary.path(
-            prompt,
-            default=default,
-            style=CUSTOM_STYLE,
-        ).ask()
-        if path is None:
-            console.print("[red]操作已取消[/red]")
-            sys.exit(0)
+        try:
+            path = questionary.path(
+                prompt,
+                default=default,
+                style=CUSTOM_STYLE,
+            ).ask()
+            if path is None:
+                _cancel_interaction()
+        except Exception as exc:
+            _warn_questionary_fallback(exc)
+            path = _plain_text_input(prompt, default=default)
         path = os.path.expanduser(path.strip())
         if must_exist and not os.path.isfile(path):
             console.print(f"[red]文件不存在: {path}[/red]")
@@ -439,27 +535,23 @@ def ask_file_path(prompt: str, must_exist: bool = True, default: str = "") -> st
 
 def ask_output_path(default_path: str) -> str:
     """交互式询问输出路径"""
-    path = questionary.text(
-        "📁 请输入输出文件路径:",
-        default=default_path,
-        style=CUSTOM_STYLE,
-    ).ask()
-    if path is None:
-        console.print("[red]操作已取消[/red]")
-        sys.exit(0)
+    path = ask_text("📁 请输入输出文件路径:", default=default_path)
     return path.strip()
 
 
 def ask_text(prompt: str, default: str = "") -> str:
     """通用文本输入"""
-    answer = questionary.text(
-        prompt,
-        default=default,
-        style=CUSTOM_STYLE,
-    ).ask()
-    if answer is None:
-        console.print("[red]操作已取消[/red]")
-        sys.exit(0)
+    try:
+        answer = questionary.text(
+            prompt,
+            default=default,
+            style=CUSTOM_STYLE,
+        ).ask()
+        if answer is None:
+            _cancel_interaction()
+    except Exception as exc:
+        _warn_questionary_fallback(exc)
+        answer = _plain_text_input(prompt, default=default)
     return answer.strip()
 
 
@@ -472,17 +564,13 @@ def ask_input_path() -> str:
 def interactive_runtime_options(input_path: str) -> Dict[str, object]:
     """交互式询问输出格式与 clump 配置"""
     input_name = Path(get_input_base(input_path)).name
-    output_format = questionary.select(
+    output_format = ask_select(
         "请选择输出格式:",
-        choices=[
+        [
             questionary.Choice("standardized (标准化 TSV)", value="standardized"),
             questionary.Choice("mr (TwoSampleMR 友好格式)", value="mr"),
         ],
-        style=CUSTOM_STYLE,
-    ).ask()
-    if output_format is None:
-        console.print("[red]操作已取消[/red]")
-        sys.exit(0)
+    )
 
     runtime: Dict[str, object] = {
         "output_format": output_format,
@@ -501,17 +589,13 @@ def interactive_runtime_options(input_path: str) -> Dict[str, object]:
     if output_format != "mr":
         return runtime
 
-    mr_role = questionary.select(
+    mr_role = ask_select(
         "请选择 MR 数据角色:",
-        choices=[
+        [
             questionary.Choice("Outcome", value="outcome"),
             questionary.Choice("Exposure (自动 clump)", value="exposure"),
         ],
-        style=CUSTOM_STYLE,
-    ).ask()
-    if mr_role is None:
-        console.print("[red]操作已取消[/red]")
-        sys.exit(0)
+    )
     runtime["mr_role"] = mr_role
 
     phenotype = ask_text("📛 请输入 phenotype 名称 (可留空):", default=input_name)
@@ -540,15 +624,10 @@ def select_column(columns: List[str], prompt: str, allow_none: bool = False) -> 
     if allow_none:
         choices.append("⏭  跳过 (无此列)")
 
-    answer = questionary.select(
+    answer = ask_select(
         prompt,
-        choices=choices,
-        style=CUSTOM_STYLE,
-    ).ask()
-
-    if answer is None:
-        console.print("[red]操作已取消[/red]")
-        sys.exit(0)
+        choices,
+    )
     if answer == "⏭  跳过 (无此列)":
         return None
     return answer
@@ -571,17 +650,14 @@ def interactive_mapping(df: pl.DataFrame) -> ColumnMapping:
 
     # ── Step 1: 选择等位基因模式 ──
     console.print("[bold yellow]━━━ Step 1: 选择等位基因记录模式 ━━━[/bold yellow]")
-    mode_answer = questionary.select(
+    mode_answer = ask_select(
         "请选择输入文件的等位基因记录规范:",
-        choices=[
+        [
             questionary.Choice("Mode A: REF/ALT (VCF 规范, BETA 针对 ALT)", value="A"),
             questionary.Choice("Mode B: Effect/Other (明确效应等位基因 EA/OA)", value="B"),
             questionary.Choice("Mode C: Allele1/Allele2 (方向可能有二义性)", value="C"),
         ],
-        style=CUSTOM_STYLE,
-    ).ask()
-    if mode_answer is None:
-        sys.exit(0)
+    )
 
     mapping.allele_mode = AlleleMode(mode_answer)
     console.print(f"  ✅ 已选择: Mode {mode_answer}\n")
@@ -605,16 +681,13 @@ def interactive_mapping(df: pl.DataFrame) -> ColumnMapping:
         mapping.allele1_col = select_column(columns, "🔹 Allele1 (A1) 列:")
         mapping.allele2_col = select_column(columns, "🔹 Allele2 (A2) 列:")
         # 追加提问
-        effect_answer = questionary.select(
+        effect_answer = ask_select(
             "效应值是针对哪个等位基因计算的?",
-            choices=[
+            [
                 questionary.Choice("A1 (Allele1)", value="A1"),
                 questionary.Choice("A2 (Allele2)", value="A2"),
             ],
-            style=CUSTOM_STYLE,
-        ).ask()
-        if effect_answer is None:
-            sys.exit(0)
+        )
         mapping.effect_on = effect_answer
     console.print()
 
@@ -622,16 +695,13 @@ def interactive_mapping(df: pl.DataFrame) -> ColumnMapping:
     console.print("[bold yellow]━━━ Step 4: 映射统计量列 ━━━[/bold yellow]")
 
     # BETA 或 OR
-    stat_answer = questionary.select(
+    stat_answer = ask_select(
         "效应统计量类型:",
-        choices=[
+        [
             questionary.Choice("BETA (效应值)", value="BETA"),
             questionary.Choice("OR (比值比, 将自动转换为 ln(OR))", value="OR"),
         ],
-        style=CUSTOM_STYLE,
-    ).ask()
-    if stat_answer is None:
-        sys.exit(0)
+    )
     mapping.stat_type = StatType(stat_answer)
     mapping.stat_col = select_column(columns, f"🔹 {stat_answer} 列:")
 
@@ -640,29 +710,23 @@ def interactive_mapping(df: pl.DataFrame) -> ColumnMapping:
 
     # P
     mapping.p_col = select_column(columns, "🔹 P (P 值) 列:")
-    pval_answer = questionary.select(
+    pval_answer = ask_select(
         "P 值格式:",
-        choices=[
+        [
             questionary.Choice("原始 P 值 (如 0.05)", value="raw"),
             questionary.Choice("-log10(P) 格式 (如 1.3)", value="neglog10"),
         ],
-        style=CUSTOM_STYLE,
-    ).ask()
-    if pval_answer is None:
-        sys.exit(0)
+    )
     mapping.pval_format = PvalFormat(pval_answer)
 
     # EAF / MAF
-    freq_answer = questionary.select(
+    freq_answer = ask_select(
         "频率列类型:",
-        choices=[
+        [
             questionary.Choice("EAF (效应等位基因频率)", value="EAF"),
             questionary.Choice("MAF (次等位基因频率)", value="MAF"),
         ],
-        style=CUSTOM_STYLE,
-    ).ask()
-    if freq_answer is None:
-        sys.exit(0)
+    )
     mapping.freq_type = FreqType(freq_answer)
     mapping.freq_col = select_column(columns, f"🔹 {freq_answer} 列:", allow_none=True)
     console.print()
@@ -670,11 +734,7 @@ def interactive_mapping(df: pl.DataFrame) -> ColumnMapping:
     # ── Step 5: 确认 ──
     display_mapping_summary(mapping)
 
-    confirm = questionary.confirm(
-        "以上映射配置是否正确?",
-        default=True,
-        style=CUSTOM_STYLE,
-    ).ask()
+    confirm = ask_confirm("以上映射配置是否正确?", default=True)
     if not confirm:
         console.print("[yellow]请重新运行程序配置映射。[/yellow]")
         sys.exit(0)
