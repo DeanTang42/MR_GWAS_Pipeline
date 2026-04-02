@@ -1,4 +1,4 @@
-name: mr-gwas-pipeline
+name: mrpipeline
 channels:
   - conda-forge
   - bioconda
@@ -12,3 +12,4 @@ dependencies:
       - polars==1.8.2
       - questionary==2.1.0
       - rich==14.3.3
+      - liftover
