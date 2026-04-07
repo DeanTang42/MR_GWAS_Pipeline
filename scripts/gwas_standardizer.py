@@ -183,7 +183,7 @@ DEFAULT_STANDARDIZED_OUTPUT_DIR = os.environ.get("MR_PIPELINE_STANDARDIZED_OUTPU
 DEFAULT_EXPOSURE_OUTPUT_DIR = os.environ.get("MR_PIPELINE_EXP_DIR", os.environ.get("MR_PIPELINE_EXPOSURE_DIR", ""))
 DEFAULT_OUTCOME_OUTPUT_DIR = os.environ.get("MR_PIPELINE_OUT_DIR", os.environ.get("MR_PIPELINE_OUTCOME_DIR", ""))
 DEFAULT_CLUMP_PLINK = os.environ.get("MR_PIPELINE_CLUMP_PLINK", "/home/ding/miniconda3/envs/GWAS/bin/plink")
-DEFAULT_CLUMP_BFILE = os.environ.get("MR_PIPELINE_CLUMP_BFILE", "/home/ding/MR_LPA/Ref/g1000_eur/g1000_eur")
+DEFAULT_CLUMP_BFILE = os.environ.get("MR_PIPELINE_CLUMP_BFILE", "/home/ding/MR_LPA/Ref/g1000_eur/g1000_eur_colon")
 DEFAULT_CLUMP_R2 = _env_float("MR_PIPELINE_CLUMP_R2", 0.1)
 DEFAULT_CLUMP_KB = _env_int("MR_PIPELINE_CLUMP_KB", 500)
 DEFAULT_CLUMP_P1 = _env_float("MR_PIPELINE_CLUMP_P1", 1e-4)
@@ -292,6 +292,75 @@ def detect_separator(filepath: str) -> str:
     return "\t"
 
 
+def needs_whitespace_normalization(filepath: str, separator: str) -> bool:
+    """识别表头和数据行空白分隔不一致的文件。"""
+    if separator not in {"\t", " "}:
+        return False
+
+    open_fn = gzip.open if filepath.endswith(".gz") else open
+    with open_fn(filepath, "rt") as f:
+        header = f.readline().strip()
+        data_line = ""
+        for line in f:
+            if line.strip():
+                data_line = line.strip()
+                break
+
+    if not header or not data_line:
+        return False
+
+    header_fields = header.split()
+    data_fields = data_line.split()
+    if len(header_fields) <= 1 or len(data_fields) <= 1:
+        return False
+
+    if separator == "\t":
+        header_tab_fields = header.split("\t")
+        data_tab_fields = data_line.split("\t")
+        return (
+            len(header_tab_fields) > 1
+            and len(data_tab_fields) == 1
+            and len(data_fields) == len(header_fields)
+        )
+
+    header_space_fields = header.split(" ")
+    data_space_fields = data_line.split(" ")
+    return (
+        len(header_space_fields) > 1
+        and len(data_space_fields) == 1
+        and len(data_fields) == len(header_fields)
+    )
+
+
+def normalize_whitespace_delimited_file(filepath: str, output_dir: str) -> str:
+    """把任意空白分隔的 GWAS 文件规范化为 tab 分隔临时文件。"""
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    tmp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".normalized.tsv",
+        prefix="standardlizer_input_",
+        dir=output_dir,
+        delete=False,
+    )
+    tmp_path = tmp_file.name
+    open_fn = gzip.open if filepath.endswith(".gz") else open
+
+    try:
+        with tmp_file as out, open_fn(filepath, "rt") as src:
+            for line in src:
+                fields = line.strip().split()
+                if not fields:
+                    continue
+                out.write("\t".join(fields) + "\n")
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+    return tmp_path
+
+
 def read_file_header(filepath: str, n_rows: int = 100) -> pl.DataFrame:
     """读取文件的前 N 行"""
     sep = detect_separator(filepath)
@@ -356,6 +425,31 @@ def derive_default_output_path(
     if target_dir:
         return str(Path(target_dir) / f"{Path(input_base).name}{suffix}")
     return input_base + suffix
+
+
+def resolve_output_path(
+    input_path: str,
+    output_path: Optional[str],
+    output_format: str = "standardized",
+    mr_role: Optional[str] = None,
+) -> str:
+    """解析输出路径；如果用户传入目录，则在目录内生成默认文件名。"""
+    if output_path:
+        output_path = os.path.expanduser(output_path.strip())
+        if output_path.endswith(os.sep) or os.path.isdir(output_path):
+            return derive_default_output_path(
+                input_path,
+                output_format=output_format,
+                mr_role=mr_role,
+                output_dir=output_path,
+            )
+        return output_path
+
+    return derive_default_output_path(
+        input_path,
+        output_format=output_format,
+        mr_role=mr_role,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -969,7 +1063,7 @@ def canonicalize_variants(df: pl.DataFrame) -> Tuple[pl.DataFrame, ProcessingSta
     df = df.with_columns([
         sort_a1.alias("_SORT_A1"),
         sort_a2.alias("_SORT_A2"),
-    ]).with_columns(
+    ]).with_columns([
         (
             pl.col("_CHR")
             + pl.lit(":")
@@ -979,7 +1073,7 @@ def canonicalize_variants(df: pl.DataFrame) -> Tuple[pl.DataFrame, ProcessingSta
             + pl.lit(":")
             + pl.col("_SORT_A2")
         ).alias("_SORT_SNPID")
-    ).with_columns(
+    ]).with_columns(
         pl.col("_SORT_SNPID").alias("_BIM_ID")
     )
 
@@ -1223,8 +1317,9 @@ def main():
             console.print("[red]--output-format mr 时必须提供 --mr-role out/exp[/red]")
             sys.exit(1)
 
-        output_path = args.output or derive_default_output_path(
+        output_path = resolve_output_path(
             input_path,
+            args.output,
             output_format=output_format,
             mr_role=mr_role,
         )
@@ -1247,103 +1342,123 @@ def main():
         clump_bfile = str(runtime["clump_bfile"])
         output_default = derive_default_output_path(input_path, output_format=output_format, mr_role=mr_role)
         output_input = ask_output_path(output_default)
-        output_path = output_input if output_input else output_default
+        output_path = resolve_output_path(input_path, output_input, output_format=output_format, mr_role=mr_role)
 
     console.print(f"  📂 输出文件: [green]{output_path}[/green]\n")
 
-    # ── Step 2: 读取预览 & 交互映射 ──
-    console.print("[cyan]🔧 正在读取输入文件...[/cyan]")
-    df_preview = read_file_header(input_path)
-
-    if cli_mode:
-        display_mapping_summary(mapping)
-    else:
-        mapping = interactive_mapping(df_preview)
-
-    mapping.separator = detect_separator(input_path)
-
-    # ── Step 3: 加载完整数据 ──
-    console.print("[cyan]🔧 正在加载完整数据...[/cyan]")
-    df_full = pl.read_csv(
-        input_path,
-        separator=mapping.separator,
-        infer_schema_length=10000,
-        truncate_ragged_lines=True,
-        ignore_errors=True,
-    )
-    console.print(f"  ✅ 已加载 {df_full.height:,} 行 × {df_full.width} 列\n")
-
-    # ── Step 4: QC & 转换 ──
-    console.print("[cyan]🔧 正在执行数据转换 & QC...[/cyan]")
-    df_clean, qc_failed = transform_and_qc(df_full, mapping)
-    console.print(f"  ✅ QC 通过 {df_clean.height:,} 行 (剔除 {qc_failed:,} 行)\n")
-
-    # ── Step 5: 解析效应等位基因 ──
-    console.print("[cyan]🔧 正在解析效应等位基因方向...[/cyan]")
-    df_clean = resolve_effect_allele(df_clean, mapping)
-
-    # ── Step 6: 生成 canonical ID & 去重 ──
-    console.print("[cyan]🔧 正在生成 canonical 位点 ID...[/cyan]")
-    df_aligned, stats = canonicalize_variants(df_clean)
-    stats.qc_failed = qc_failed
-
-    if stats.maf_without_eaf > 0:
+    read_input_path = input_path
+    input_separator = detect_separator(input_path)
+    normalized_input_path: Optional[str] = None
+    if needs_whitespace_normalization(input_path, input_separator):
         console.print(
-            f"[yellow]⚠ 检测到 {stats.maf_without_eaf:,} 个位点只有 MAF，"
-            "在无 reference 模式下无法可靠转换为 EAF；MR 输出中的 effect_allele_frequency 将为空。[/yellow]\n"
+            "[yellow]⚠ 检测到表头和数据行使用了不同的空白分隔符，"
+            "正在生成临时 tab 分隔输入文件...[/yellow]"
         )
-
-    # ── Step 7: 输出 ──
-    if output_format == "mr":
-        console.print("[cyan]🔧 正在写出 MR 中间结果...[/cyan]")
-        tmp_file = tempfile.NamedTemporaryFile(
-            suffix=".mr_raw.tsv.gz",
-            prefix="standardlizer_",
-            dir=str(Path(output_path).parent),
-            delete=False,
+        normalized_input_path = normalize_whitespace_delimited_file(
+            input_path,
+            str(Path(output_path).parent),
         )
-        tmp_output_path = tmp_file.name
-        tmp_file.close()
+        read_input_path = normalized_input_path
+        input_separator = "\t"
+        console.print(f"  ✅ 临时规范化文件: [dim]{normalized_input_path}[/dim]\n")
 
-        try:
+    # ── Step 2: 读取预览 & 交互映射 ──
+    try:
+        console.print("[cyan]🔧 正在读取输入文件...[/cyan]")
+        df_preview = read_file_header(read_input_path)
+
+        if cli_mode:
+            display_mapping_summary(mapping)
+        else:
+            mapping = interactive_mapping(df_preview)
+
+        mapping.separator = input_separator
+
+        # ── Step 3: 加载完整数据 ──
+        console.print("[cyan]🔧 正在加载完整数据...[/cyan]")
+        df_full = pl.read_csv(
+            read_input_path,
+            separator=mapping.separator,
+            infer_schema_length=10000,
+            truncate_ragged_lines=True,
+            ignore_errors=True,
+        )
+        console.print(f"  ✅ 已加载 {df_full.height:,} 行 × {df_full.width} 列\n")
+
+        # ── Step 4: QC & 转换 ──
+        console.print("[cyan]🔧 正在执行数据转换 & QC...[/cyan]")
+        df_clean, qc_failed = transform_and_qc(df_full, mapping)
+        console.print(f"  ✅ QC 通过 {df_clean.height:,} 行 (剔除 {qc_failed:,} 行)\n")
+
+        # ── Step 5: 解析效应等位基因 ──
+        console.print("[cyan]🔧 正在解析效应等位基因方向...[/cyan]")
+        df_clean = resolve_effect_allele(df_clean, mapping)
+
+        # ── Step 6: 生成 canonical ID & 去重 ──
+        console.print("[cyan]🔧 正在生成 canonical 位点 ID...[/cyan]")
+        df_aligned, stats = canonicalize_variants(df_clean)
+        stats.qc_failed = qc_failed
+
+        if stats.maf_without_eaf > 0:
+            console.print(
+                f"[yellow]⚠ 检测到 {stats.maf_without_eaf:,} 个位点只有 MAF，"
+                "在无 reference 模式下无法可靠转换为 EAF；MR 输出中的 effect_allele_frequency 将为空。[/yellow]\n"
+            )
+
+        # ── Step 7: 输出 ──
+        if output_format == "mr":
+            console.print("[cyan]🔧 正在写出 MR 中间结果...[/cyan]")
+            tmp_file = tempfile.NamedTemporaryFile(
+                suffix=".mr_raw.tsv.gz",
+                prefix="standardlizer_",
+                dir=str(Path(output_path).parent),
+                delete=False,
+            )
+            tmp_output_path = tmp_file.name
+            tmp_file.close()
+
+            try:
+                write_output(
+                    df_aligned,
+                    tmp_output_path,
+                    mapping,
+                    output_format="mr_raw",
+                    phenotype=phenotype,
+                    sample_size=sample_size,
+                )
+                format_mr_output(
+                    tmp_output_path,
+                    output_path,
+                    mr_role=mr_role or "outcome",
+                    r_lib_path=r_lib_path,
+                    phenotype=phenotype,
+                    sample_size=sample_size,
+                    clump_r2=clump_r2,
+                    clump_kb=clump_kb,
+                    clump_p1=clump_p1,
+                    clump_pop=clump_pop,
+                    clump_plink=clump_plink,
+                    clump_bfile=clump_bfile,
+                )
+            finally:
+                if os.path.exists(tmp_output_path):
+                    os.remove(tmp_output_path)
+        else:
+            console.print("[cyan]🔧 正在写出标准化结果...[/cyan]")
             write_output(
                 df_aligned,
-                tmp_output_path,
-                mapping,
-                output_format="mr_raw",
-                phenotype=phenotype,
-                sample_size=sample_size,
-            )
-            format_mr_output(
-                tmp_output_path,
                 output_path,
-                mr_role=mr_role or "outcome",
-                r_lib_path=r_lib_path,
+                mapping,
+                output_format="standardized",
                 phenotype=phenotype,
                 sample_size=sample_size,
-                clump_r2=clump_r2,
-                clump_kb=clump_kb,
-                clump_p1=clump_p1,
-                clump_pop=clump_pop,
-                clump_plink=clump_plink,
-                clump_bfile=clump_bfile,
             )
-        finally:
-            if os.path.exists(tmp_output_path):
-                os.remove(tmp_output_path)
-    else:
-        console.print("[cyan]🔧 正在写出标准化结果...[/cyan]")
-        write_output(
-            df_aligned,
-            output_path,
-            mapping,
-            output_format="standardized",
-            phenotype=phenotype,
-            sample_size=sample_size,
-        )
 
-    # ── Step 8: 报告 ──
-    generate_report(stats, output_path, input_path)
+        # ── Step 8: 报告 ──
+        generate_report(stats, output_path, input_path)
+    finally:
+        if normalized_input_path and os.path.exists(normalized_input_path):
+            os.remove(normalized_input_path)
 
     console.print("[bold green]🎉 标准化流程完成！[/bold green]\n")
 
