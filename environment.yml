@@ -8,6 +8,21 @@ dependencies:
   - pip
   - plink=1.90b6.21
   - r-base=4.3
+  - r-data.table
+  - r-dplyr
+  - r-ggplot2
+  - r-remotes
+  - r-rcpp
+  - r-rcppeigen
+  - c-compiler
+  - cxx-compiler
+  - fortran-compiler
+  - make
+  - pkg-config
+  - git
+  - libcurl
+  - libxml2
+  - openssl
   - pip:
       - polars==1.8.2
       - questionary==2.1.0

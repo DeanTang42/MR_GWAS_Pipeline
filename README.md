@@ -56,6 +56,16 @@ R 包不再由项目自动安装。需要的包名清单见 [config/r_packages.t
 
 ## 快速开始
 
+### Docker 方式
+
+如果服务器上 R 包安装成本较高，推荐直接构建 Docker 镜像：
+
+```bash
+docker build -t mr-gwas-pipeline:latest .
+```
+
+Docker 镜像内会安装 Python、R、PLINK 和 MR 相关 R 包；GWAS 数据、reference bfile 和结果目录通过 volume 挂载，不打进镜像。详细命令见 [docs/Docker使用说明.md](docs/Docker使用说明.md)。
+
 ### 1. 安装 Python 依赖
 
 ```bash
@@ -141,6 +151,14 @@ bash bin/standardize_gwas.sh \
 - `STANDARDIZED_OUTPUT_DIR`
 - `OUT_OUTPUT_DIR`
 - `EXP_OUTPUT_DIR`
+
+如果需要同时生成标准化 TSV 和 MR-ready CSV，可以使用：
+
+```bash
+--output-format both
+```
+
+此时必须同时提供 `--mr-role out` 或 `--mr-role exp`。不传 `--output` 时，标准化 TSV 会写入 `STANDARDIZED_OUTPUT_DIR`，MR-ready 文件会写入 `OUT_OUTPUT_DIR` 或 `EXP_OUTPUT_DIR`；如果 `--output` 传入目录，两种文件都会写到该目录。
 
 ### 5. 运行 MR 分析
 

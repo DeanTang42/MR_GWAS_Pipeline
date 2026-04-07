@@ -402,6 +402,17 @@ def get_configured_output_dir(output_format: str, mr_role: Optional[str] = None)
     return DEFAULT_STANDARDIZED_OUTPUT_DIR or None
 
 
+def get_mr_output_suffix(mr_role: Optional[str]) -> str:
+    """根据 MR 角色生成输出后缀。"""
+    role_suffix_map = {
+        "out": "_outcome.csv",
+        "outcome": "_outcome.csv",
+        "exp": "_exposure.csv",
+        "exposure": "_exposure.csv",
+    }
+    return role_suffix_map.get((mr_role or "").lower(), "_mr.csv")
+
+
 def derive_default_output_path(
     input_path: str,
     output_format: str = "standardized",
@@ -411,13 +422,7 @@ def derive_default_output_path(
     """根据输入路径和输出模式生成默认输出路径"""
     input_base = get_input_base(input_path)
     if output_format == "mr":
-        role_suffix_map = {
-            "out": "_outcome.csv",
-            "outcome": "_outcome.csv",
-            "exp": "_exposure.csv",
-            "exposure": "_exposure.csv",
-        }
-        suffix = role_suffix_map.get((mr_role or "").lower(), "_mr.csv")
+        suffix = get_mr_output_suffix(mr_role)
     else:
         suffix = "_standardized.tsv.gz"
 
@@ -425,6 +430,15 @@ def derive_default_output_path(
     if target_dir:
         return str(Path(target_dir) / f"{Path(input_base).name}{suffix}")
     return input_base + suffix
+
+
+def get_output_prefix(output_path: str) -> str:
+    """把用户传入的文件名当作输出前缀时，去掉常见扩展名。"""
+    output_prefix = output_path
+    for suffix in (".tsv.gz", ".csv.gz", ".tsv", ".csv", ".gz"):
+        if output_prefix.endswith(suffix):
+            return output_prefix[: -len(suffix)]
+    return output_prefix
 
 
 def resolve_output_path(
@@ -452,6 +466,52 @@ def resolve_output_path(
     )
 
 
+def resolve_output_paths(
+    input_path: str,
+    output_path: Optional[str],
+    output_format: str = "standardized",
+    mr_role: Optional[str] = None,
+) -> Dict[str, str]:
+    """解析一个或多个输出路径。"""
+    if output_format != "both":
+        return {
+            output_format: resolve_output_path(
+                input_path,
+                output_path,
+                output_format=output_format,
+                mr_role=mr_role,
+            )
+        }
+
+    if not output_path:
+        return {
+            "standardized": derive_default_output_path(input_path, output_format="standardized"),
+            "mr": derive_default_output_path(input_path, output_format="mr", mr_role=mr_role),
+        }
+
+    output_path = os.path.expanduser(output_path.strip())
+    if output_path.endswith(os.sep) or os.path.isdir(output_path):
+        return {
+            "standardized": derive_default_output_path(
+                input_path,
+                output_format="standardized",
+                output_dir=output_path,
+            ),
+            "mr": derive_default_output_path(
+                input_path,
+                output_format="mr",
+                mr_role=mr_role,
+                output_dir=output_path,
+            ),
+        }
+
+    output_prefix = get_output_prefix(output_path)
+    return {
+        "standardized": f"{output_prefix}_standardized.tsv.gz",
+        "mr": f"{output_prefix}{get_mr_output_suffix(mr_role)}",
+    }
+
+
 def parse_args() -> argparse.Namespace:
     """解析命令行参数，支持交互式和非交互式两种模式"""
     parser = argparse.ArgumentParser(
@@ -462,9 +522,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", help="输出文件路径")
     parser.add_argument(
         "--output-format",
-        choices=["standardized", "mr"],
+        choices=["standardized", "mr", "both"],
         default="standardized",
-        help="输出格式: standardized 或 mr (TwoSampleMR 输入友好格式)",
+        help="输出格式: standardized、mr 或 both (同时生成两种格式)",
     )
     parser.add_argument("--mode", choices=[m.value for m in AlleleMode], help="等位基因模式: A/B/C")
     parser.add_argument("--snp-col", help="SNP/variant ID 列名")
@@ -627,9 +687,9 @@ def ask_file_path(prompt: str, must_exist: bool = True, default: str = "") -> st
         return path
 
 
-def ask_output_path(default_path: str) -> str:
+def ask_output_path(default_path: str, prompt: str = "📁 请输入输出文件路径:") -> str:
     """交互式询问输出路径"""
-    path = ask_text("📁 请输入输出文件路径:", default=default_path)
+    path = ask_text(prompt, default=default_path)
     return path.strip()
 
 
@@ -663,6 +723,7 @@ def interactive_runtime_options(input_path: str) -> Dict[str, object]:
         [
             questionary.Choice("standardized (标准化 TSV)", value="standardized"),
             questionary.Choice("mr (TwoSampleMR 友好格式)", value="mr"),
+            questionary.Choice("both (同时生成以上两种格式)", value="both"),
         ],
     )
 
@@ -680,7 +741,7 @@ def interactive_runtime_options(input_path: str) -> Dict[str, object]:
         "r_lib_path": DEFAULT_R_LIB_PATH,
     }
 
-    if output_format != "mr":
+    if output_format not in {"mr", "both"}:
         return runtime
 
     mr_role = ask_select(
@@ -1232,10 +1293,66 @@ def format_mr_output(
         console.print(f"[yellow]{completed.stderr.strip()}[/yellow]")
 
 
+def write_mr_ready_output(
+    df: pl.DataFrame,
+    output_path: str,
+    mapping: ColumnMapping,
+    mr_role: str,
+    r_lib_path: str,
+    phenotype: Optional[str],
+    sample_size: Optional[int],
+    clump_r2: float,
+    clump_kb: int,
+    clump_p1: float,
+    clump_pop: str,
+    clump_plink: str,
+    clump_bfile: str,
+) -> None:
+    """写出 MR 中间表并调用 R 转为 TwoSampleMR 输入格式。"""
+    console.print("[cyan]🔧 正在写出 MR 中间结果...[/cyan]")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = tempfile.NamedTemporaryFile(
+        suffix=".mr_raw.tsv.gz",
+        prefix="standardlizer_",
+        dir=str(Path(output_path).parent),
+        delete=False,
+    )
+    tmp_output_path = tmp_file.name
+    tmp_file.close()
+
+    try:
+        write_output(
+            df,
+            tmp_output_path,
+            mapping,
+            output_format="mr_raw",
+            phenotype=phenotype,
+            sample_size=sample_size,
+        )
+        format_mr_output(
+            tmp_output_path,
+            output_path,
+            mr_role=mr_role,
+            r_lib_path=r_lib_path,
+            phenotype=phenotype,
+            sample_size=sample_size,
+            clump_r2=clump_r2,
+            clump_kb=clump_kb,
+            clump_p1=clump_p1,
+            clump_pop=clump_pop,
+            clump_plink=clump_plink,
+            clump_bfile=clump_bfile,
+        )
+    finally:
+        if os.path.exists(tmp_output_path):
+            os.remove(tmp_output_path)
+
+
 def generate_report(
     stats: ProcessingStats,
     output_path: str,
     input_path: str,
+    output_paths: Optional[List[str]] = None,
 ):
     """生成审计报告"""
     report_path = (
@@ -1250,13 +1367,19 @@ def generate_report(
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    if output_paths and len(output_paths) > 1:
+        output_lines = ["输出文件:"]
+        output_lines.extend([f"  - {path}" for path in output_paths])
+    else:
+        output_lines = [f"输出文件: {output_path}"]
+
     lines = [
         "=" * 60,
         "GWAS Standardizer - 无 reference 审计报告",
         "=" * 60,
         f"时间: {timestamp}",
         f"输入文件: {input_path}",
-        f"输出文件: {output_path}",
+        *output_lines,
         "-" * 60,
         f"初始输入变异总数:           {stats.total_input:>10,}",
         f"QC 不达标剔除:              {stats.qc_failed:>10,}",
@@ -1313,11 +1436,11 @@ def main():
     if cli_mode:
         mapping = build_mapping_from_args(args)
         input_path = args.input or ""
-        if output_format == "mr" and mr_role is None:
-            console.print("[red]--output-format mr 时必须提供 --mr-role out/exp[/red]")
+        if output_format in {"mr", "both"} and mr_role is None:
+            console.print("[red]--output-format mr/both 时必须提供 --mr-role out/exp[/red]")
             sys.exit(1)
 
-        output_path = resolve_output_path(
+        output_paths = resolve_output_paths(
             input_path,
             args.output,
             output_format=output_format,
@@ -1340,11 +1463,25 @@ def main():
         clump_pop = str(runtime["clump_pop"])
         clump_plink = str(runtime["clump_plink"])
         clump_bfile = str(runtime["clump_bfile"])
-        output_default = derive_default_output_path(input_path, output_format=output_format, mr_role=mr_role)
-        output_input = ask_output_path(output_default)
-        output_path = resolve_output_path(input_path, output_input, output_format=output_format, mr_role=mr_role)
+        if output_format == "both":
+            console.print("[dim]留空则分别使用 STANDARDIZED_OUTPUT_DIR 和 EXP/OUT_OUTPUT_DIR。[/dim]")
+            output_input = ask_output_path(
+                "",
+                prompt="📁 请输入输出目录或文件名前缀:",
+            )
+        else:
+            output_default = derive_default_output_path(input_path, output_format=output_format, mr_role=mr_role)
+            output_input = ask_output_path(output_default)
+        output_paths = resolve_output_paths(input_path, output_input, output_format=output_format, mr_role=mr_role)
 
-    console.print(f"  📂 输出文件: [green]{output_path}[/green]\n")
+    primary_output_path = output_paths.get("mr") or output_paths.get("standardized") or next(iter(output_paths.values()))
+    if len(output_paths) == 1:
+        console.print(f"  📂 输出文件: [green]{primary_output_path}[/green]\n")
+    else:
+        console.print("  📂 输出文件:")
+        for label, path in output_paths.items():
+            console.print(f"     {label}: [green]{path}[/green]")
+        console.print()
 
     read_input_path = input_path
     input_separator = detect_separator(input_path)
@@ -1356,7 +1493,7 @@ def main():
         )
         normalized_input_path = normalize_whitespace_delimited_file(
             input_path,
-            str(Path(output_path).parent),
+            str(Path(primary_output_path).parent),
         )
         read_input_path = normalized_input_path
         input_separator = "\t"
@@ -1406,56 +1543,41 @@ def main():
             )
 
         # ── Step 7: 输出 ──
-        if output_format == "mr":
-            console.print("[cyan]🔧 正在写出 MR 中间结果...[/cyan]")
-            tmp_file = tempfile.NamedTemporaryFile(
-                suffix=".mr_raw.tsv.gz",
-                prefix="standardlizer_",
-                dir=str(Path(output_path).parent),
-                delete=False,
-            )
-            tmp_output_path = tmp_file.name
-            tmp_file.close()
-
-            try:
-                write_output(
-                    df_aligned,
-                    tmp_output_path,
-                    mapping,
-                    output_format="mr_raw",
-                    phenotype=phenotype,
-                    sample_size=sample_size,
-                )
-                format_mr_output(
-                    tmp_output_path,
-                    output_path,
-                    mr_role=mr_role or "outcome",
-                    r_lib_path=r_lib_path,
-                    phenotype=phenotype,
-                    sample_size=sample_size,
-                    clump_r2=clump_r2,
-                    clump_kb=clump_kb,
-                    clump_p1=clump_p1,
-                    clump_pop=clump_pop,
-                    clump_plink=clump_plink,
-                    clump_bfile=clump_bfile,
-                )
-            finally:
-                if os.path.exists(tmp_output_path):
-                    os.remove(tmp_output_path)
-        else:
+        if "standardized" in output_paths:
             console.print("[cyan]🔧 正在写出标准化结果...[/cyan]")
             write_output(
                 df_aligned,
-                output_path,
+                output_paths["standardized"],
                 mapping,
                 output_format="standardized",
                 phenotype=phenotype,
                 sample_size=sample_size,
             )
 
+        if "mr" in output_paths:
+            write_mr_ready_output(
+                df_aligned,
+                output_paths["mr"],
+                mapping,
+                mr_role=mr_role or "outcome",
+                r_lib_path=r_lib_path,
+                phenotype=phenotype,
+                sample_size=sample_size,
+                clump_r2=clump_r2,
+                clump_kb=clump_kb,
+                clump_p1=clump_p1,
+                clump_pop=clump_pop,
+                clump_plink=clump_plink,
+                clump_bfile=clump_bfile,
+            )
+
         # ── Step 8: 报告 ──
-        generate_report(stats, output_path, input_path)
+        generate_report(
+            stats,
+            primary_output_path,
+            input_path,
+            output_paths=list(output_paths.values()),
+        )
     finally:
         if normalized_input_path and os.path.exists(normalized_input_path):
             os.remove(normalized_input_path)
