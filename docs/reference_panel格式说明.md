@@ -1,138 +1,96 @@
-# Reference Panel 格式说明
+# 1KG `.frq` 参考频率说明
 
-> 该文档已弃用。当前 `MR_GWAS_Pipeline` 的标准化流程不再依赖 reference panel，本文件仅保留作历史记录。
+当前项目的标准化流程本身不再依赖 reference panel。reference 现在只用于一个独立步骤：当 GWAS 只有 `MAF`、没有 `EAF` 时，用 1KG `.frq` 的 A1/A2 方向为原文件 `MAF` 定向，从而补充 `EAF`。
 
-这个项目要求你自己准备 reference panel。文件本身可以是 `.tsv` 或 `.tsv.gz`，核心是列名和列语义要满足下面的要求。
+## 1. 构建命令
 
-## 1. 必需列
+默认使用 [defaults.env](/home/ding/MR_GWAS_Pipeline/config/defaults.env) 里的 `CLUMP_BFILE`：
 
-至少需要这 5 列：
-
-- `CHR`
-- `POS`
-- `REF`
-- `ALT`
-- `AF`
-
-程序内部会把它们统一重命名成：
-
-- `REF_CHR`
-- `REF_POS`
-- `REF_REF`
-- `REF_ALT`
-- `REF_AF`
-
-## 2. 可选列
-
-以下列不是必须，但如果有会被保留下来用于注释：
-
-- `RSID`
-- `ID`
-- `SNP_ID`
-
-## 3. 列名兼容规则
-
-程序对列名做了大小写不敏感兼容，下面这些名字都能识别：
-
-### 染色体列
-
-- `CHR`
-- `#CHR`
-- `CHROM`
-- `#CHROM`
-
-### 位置列
-
-- `POS`
-- `BP`
-- `POSITION`
-
-### REF 列
-
-- `REF`
-- `A1`
-- `ALLELE1`
-
-### ALT 列
-
-- `ALT`
-- `A2`
-- `ALLELE2`
-
-### 频率列
-
-- `AF`
-- `MAF`
-- `A1F`
-- `FRQ`
-- `FREQ`
-- `EAF`
-
-## 4. 语义要求
-
-### `CHR`
-
-- 染色体号
-- 可以是 `1` 到 `22`，也可以写成 `chr1` 这种形式
-- 程序会自动去掉前缀 `chr`
-
-### `POS`
-
-- hg19/GRCh37 坐标下的碱基位置
-- 必须和输入 GWAS 使用同一套 build
-
-### `REF` 和 `ALT`
-
-- 这两列必须能稳定代表该位点的两条等位基因
-- 项目当前的对齐逻辑默认把 `ALT` 作为标准化后的 effect allele 方向参考
-- 你现在的 panel 若来自 `.bim`，通常就是按当前流程约定，把 PLINK 的 `A2/A1` 映射成 `REF/ALT`
-
-### `AF`
-
-- 必须表示 `ALT` 的频率
-- 取值范围必须在 `0` 到 `1` 之间
-- 回文 SNP 判定时会依赖这列
-
-## 5. 允许的变异类型
-
-当前流程最稳的是双等位基因单碱基 SNP：
-
-- `REF` 和 `ALT` 都是单个碱基
-- 只包含 `A/C/G/T`
-- 不建议把 indel 或复杂变异混进来
-
-## 6. 推荐输出示例
-
-```text
-CHR	POS	REF	ALT	AF	RSID
-1	10539	C	A	0.000994	rs537182016
-1	11008	C	G	0.088470	rs575272151
-1	13110	G	A	0.056660	rs540538026
+```bash
+bash bin/build_1kg_frq_reference.sh
 ```
 
-如果你愿意，也可以再额外保留一个按字典序构造的位点 ID 列，例如：
+也可以手动指定：
 
-```text
-SNP = CHR:POS:sorted(allele1):sorted(allele2)
+```bash
+bash bin/build_1kg_frq_reference.sh \
+  --bfile /path/to/g1000_eur_colon \
+  --out-prefix /home/ding/MR_GWAS_Pipeline/data/reference/g1000_eur_colon
 ```
 
-但这列不是必需的，程序会自己生成内部匹配键。
+## 2. 输出文件
 
-## 7. 这个 panel 主要用来做什么
+构建脚本会生成两个文件：
 
-它不是直接拿来做 MR 的，而是拿来做标准化时的四件事：
+- `data/reference/g1000_eur_colon.frq`
+- `data/reference/g1000_eur_colon.frq.tsv.gz`
 
-1. 统一位点标识
-2. 统一等位基因方向
-3. 用频率解决回文 SNP
-4. 剔除无法可靠对齐的位点
+其中 `.frq` 是 PLINK 原生输出，`.frq.tsv.gz` 是给 Python 注释脚本读取的规范化版本。
 
-## 8. 最容易出错的地方
+## 3. 必需列
 
-最常见的问题有三类：
+规范化版本必须包含以下列：
 
-1. `AF` 不是 `ALT` 的频率，而是别的等位基因频率
-2. `REF/ALT` 和输入 GWAS 的 build 不一致
-3. panel 里混入 indel、多等位基因位点或不规范碱基
+```text
+SNP	A1	A2	MAF
+```
 
-如果这三点有问题，标准化结果会直接偏掉。
+语义如下：
+
+- `SNP`: 必须和标准化 GWAS 的 `BIM_ID` 一致，例如 `CHR:POS:A1:A2`
+- `A1`: PLINK `.frq` 里的 A1
+- `A2`: PLINK `.frq` 里的 A2
+- `MAF`: A1 的频率
+
+## 4. EAF 注释逻辑
+
+注释脚本读取标准化 GWAS：
+
+```text
+BIM_ID	CHR	POS	VARIANT_ID	RSID	EFFECT_ALLELE	OTHER_ALLELE	BETA	SE	P	EAF	MAF
+```
+
+只处理 `EAF=NA` 且 `MAF` 有值的行。
+
+如果 `BIM_ID` 能匹配 `.frq`，且等位基因方向一致：
+
+- `EFFECT_ALLELE == A1`: `EAF_FROM_MAF = MAF`
+- `EFFECT_ALLELE == A2`: `EAF_FROM_MAF = 1 - MAF`
+- `EAF_1KG` 同理使用 1KG `.frq` 中的 `MAF` 计算
+- 主列 `EAF` 用 `EAF_FROM_MAF` 填充
+
+如果匹配不到 reference、`MAF` 缺失或等位基因对不上，`EAF` 继续保持 `NA`。
+
+## 5. 审计列
+
+运行 `annotate_eaf.sh` 后，标准化文件会新增：
+
+- `EAF_1KG`
+- `EAF_FROM_MAF`
+- `EAF_ABS_DIFF`
+
+## 6. 配套输出
+
+默认命令：
+
+```bash
+bash bin/annotate_eaf.sh \
+  --non-interactive \
+  --input data/standardized/GWAS.tsv.gz
+```
+
+会替换原标准化文件，并生成：
+
+- `GWAS.eaf_matched.tsv.gz`
+- `GWAS.eaf_frequency_diff.tsv.gz`
+- `GWAS.eaf_annotation.log`
+
+如果不希望替换原文件：
+
+```bash
+bash bin/annotate_eaf.sh \
+  --non-interactive \
+  --input data/standardized/GWAS.tsv.gz \
+  --no-replace-input \
+  --output data/standardized/GWAS.eaf_annotated.tsv.gz
+```

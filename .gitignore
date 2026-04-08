@@ -24,7 +24,12 @@ logs/*
 !logs/.gitkeep
 
 *.log
+*.frq
 *.frq.gz
+*.frq.tsv.gz
+*.eaf_matched.tsv.gz
+*.eaf_frequency_diff.tsv.gz
+*.eaf_annotation.log
 *.nosex
 *.clumped
 *.tmp

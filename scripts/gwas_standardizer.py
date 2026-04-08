@@ -8,7 +8,7 @@ Date   : 2026-03-09
 Description:
     交互式 GWAS 摘要统计数据标准化工具。
     - 交互式列映射（questionary + rich）
-    - 无 reference 的 canonical ID 生成
+    - canonical ID 生成
     - 质量控制（OR→BETA, -log10P→P, 过滤, 去重）
 
 Usage:
@@ -22,11 +22,10 @@ import math
 import gzip
 import logging
 import shutil
-import subprocess
 import tempfile
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Tuple
 from pathlib import Path
 from datetime import datetime
 
@@ -157,37 +156,8 @@ def ask_confirm(prompt: str, default: bool = True) -> bool:
         console.print("[red]请输入 y 或 n。[/red]")
 
 
-def _env_float(name: str, default: float) -> float:
-    value = os.environ.get(name)
-    if value is None or value == "":
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if value is None or value == "":
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-DEFAULT_R_LIB_PATH = os.environ.get("MR_PIPELINE_R_LIB_PATH", "/home/ding/R/4.4.1_MR")
 DEFAULT_ORG_DIR = os.environ.get("MR_PIPELINE_ORG_DIR", "")
 DEFAULT_STANDARDIZED_OUTPUT_DIR = os.environ.get("MR_PIPELINE_STANDARDIZED_OUTPUT_DIR", "")
-DEFAULT_EXPOSURE_OUTPUT_DIR = os.environ.get("MR_PIPELINE_EXP_DIR", os.environ.get("MR_PIPELINE_EXPOSURE_DIR", ""))
-DEFAULT_OUTCOME_OUTPUT_DIR = os.environ.get("MR_PIPELINE_OUT_DIR", os.environ.get("MR_PIPELINE_OUTCOME_DIR", ""))
-DEFAULT_CLUMP_PLINK = os.environ.get("MR_PIPELINE_CLUMP_PLINK", "/home/ding/miniconda3/envs/GWAS/bin/plink")
-DEFAULT_CLUMP_BFILE = os.environ.get("MR_PIPELINE_CLUMP_BFILE", "/home/ding/MR_LPA/Ref/g1000_eur/g1000_eur_colon")
-DEFAULT_CLUMP_R2 = _env_float("MR_PIPELINE_CLUMP_R2", 0.1)
-DEFAULT_CLUMP_KB = _env_int("MR_PIPELINE_CLUMP_KB", 500)
-DEFAULT_CLUMP_P1 = _env_float("MR_PIPELINE_CLUMP_P1", 1e-4)
-DEFAULT_CLUMP_POP = os.environ.get("MR_PIPELINE_CLUMP_POP", "EUR")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -389,63 +359,22 @@ def get_input_base(input_path: str) -> str:
     return input_base
 
 
-def get_configured_output_dir(output_format: str, mr_role: Optional[str] = None) -> Optional[str]:
-    """根据输出类型选择 config 中的默认输出目录"""
-    if output_format == "mr":
-        role = normalize_mr_role(mr_role)
-        if role == "outcome" and DEFAULT_OUTCOME_OUTPUT_DIR:
-            return DEFAULT_OUTCOME_OUTPUT_DIR
-        if role == "exposure" and DEFAULT_EXPOSURE_OUTPUT_DIR:
-            return DEFAULT_EXPOSURE_OUTPUT_DIR
-        return None
-
-    return DEFAULT_STANDARDIZED_OUTPUT_DIR or None
-
-
-def get_mr_output_suffix(mr_role: Optional[str]) -> str:
-    """根据 MR 角色生成输出后缀。"""
-    role_suffix_map = {
-        "out": "_outcome.csv",
-        "outcome": "_outcome.csv",
-        "exp": "_exposure.csv",
-        "exposure": "_exposure.csv",
-    }
-    return role_suffix_map.get((mr_role or "").lower(), "_mr.csv")
-
-
 def derive_default_output_path(
     input_path: str,
-    output_format: str = "standardized",
-    mr_role: Optional[str] = None,
     output_dir: Optional[str] = None,
 ) -> str:
-    """根据输入路径和输出模式生成默认输出路径"""
+    """根据输入路径生成默认标准化输出路径"""
     input_base = get_input_base(input_path)
-    if output_format == "mr":
-        suffix = get_mr_output_suffix(mr_role)
-    else:
-        suffix = "_standardized.tsv.gz"
-
-    target_dir = output_dir or get_configured_output_dir(output_format, mr_role)
+    suffix = "_standardized.tsv.gz"
+    target_dir = output_dir or DEFAULT_STANDARDIZED_OUTPUT_DIR or None
     if target_dir:
         return str(Path(target_dir) / f"{Path(input_base).name}{suffix}")
     return input_base + suffix
 
 
-def get_output_prefix(output_path: str) -> str:
-    """把用户传入的文件名当作输出前缀时，去掉常见扩展名。"""
-    output_prefix = output_path
-    for suffix in (".tsv.gz", ".csv.gz", ".tsv", ".csv", ".gz"):
-        if output_prefix.endswith(suffix):
-            return output_prefix[: -len(suffix)]
-    return output_prefix
-
-
 def resolve_output_path(
     input_path: str,
     output_path: Optional[str],
-    output_format: str = "standardized",
-    mr_role: Optional[str] = None,
 ) -> str:
     """解析输出路径；如果用户传入目录，则在目录内生成默认文件名。"""
     if output_path:
@@ -453,78 +382,25 @@ def resolve_output_path(
         if output_path.endswith(os.sep) or os.path.isdir(output_path):
             return derive_default_output_path(
                 input_path,
-                output_format=output_format,
-                mr_role=mr_role,
                 output_dir=output_path,
             )
         return output_path
 
-    return derive_default_output_path(
-        input_path,
-        output_format=output_format,
-        mr_role=mr_role,
-    )
-
-
-def resolve_output_paths(
-    input_path: str,
-    output_path: Optional[str],
-    output_format: str = "standardized",
-    mr_role: Optional[str] = None,
-) -> Dict[str, str]:
-    """解析一个或多个输出路径。"""
-    if output_format != "both":
-        return {
-            output_format: resolve_output_path(
-                input_path,
-                output_path,
-                output_format=output_format,
-                mr_role=mr_role,
-            )
-        }
-
-    if not output_path:
-        return {
-            "standardized": derive_default_output_path(input_path, output_format="standardized"),
-            "mr": derive_default_output_path(input_path, output_format="mr", mr_role=mr_role),
-        }
-
-    output_path = os.path.expanduser(output_path.strip())
-    if output_path.endswith(os.sep) or os.path.isdir(output_path):
-        return {
-            "standardized": derive_default_output_path(
-                input_path,
-                output_format="standardized",
-                output_dir=output_path,
-            ),
-            "mr": derive_default_output_path(
-                input_path,
-                output_format="mr",
-                mr_role=mr_role,
-                output_dir=output_path,
-            ),
-        }
-
-    output_prefix = get_output_prefix(output_path)
-    return {
-        "standardized": f"{output_prefix}_standardized.tsv.gz",
-        "mr": f"{output_prefix}{get_mr_output_suffix(mr_role)}",
-    }
+    return derive_default_output_path(input_path)
 
 
 def parse_args() -> argparse.Namespace:
     """解析命令行参数，支持交互式和非交互式两种模式"""
     parser = argparse.ArgumentParser(
-        description="GWAS 摘要统计数据标准化工具（无 reference 版本）",
+        description="GWAS 摘要统计数据标准化工具",
     )
     parser.add_argument("--input", help="输入 GWAS 摘要统计文件")
-    parser.add_argument("--reference", help="已废弃，当前版本不再使用 reference panel")
     parser.add_argument("--output", help="输出文件路径")
     parser.add_argument(
         "--output-format",
-        choices=["standardized", "mr", "both"],
+        choices=["standardized"],
         default="standardized",
-        help="输出格式: standardized、mr 或 both (同时生成两种格式)",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--mode", choices=[m.value for m in AlleleMode], help="等位基因模式: A/B/C")
     parser.add_argument("--snp-col", help="SNP/variant ID 列名")
@@ -532,7 +408,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pos-col", help="位置列名")
     parser.add_argument("--allele1-col", help="等位基因 1 列名")
     parser.add_argument("--allele2-col", help="等位基因 2 列名")
-    parser.add_argument("--effect-on", choices=["A1", "A2", "Unknown"], help="Mode C 时效应作用在哪个等位基因上；Unknown 在无 reference 模式下不支持")
+    parser.add_argument("--effect-on", choices=["A1", "A2", "Unknown"], help="Mode C 时效应作用在哪个等位基因上；Unknown 当前不支持")
     parser.add_argument("--stat-type", choices=[s.value for s in StatType], help="统计量类型: BETA/OR")
     parser.add_argument("--stat-col", help="效应统计量列名")
     parser.add_argument("--se-col", help="标准误列名")
@@ -540,32 +416,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pval-format", choices=[p.value for p in PvalFormat], help="P 值格式: raw/neglog10")
     parser.add_argument("--freq-type", choices=[f.value for f in FreqType], help="频率类型: EAF/MAF")
     parser.add_argument("--freq-col", help="频率列名")
-    parser.add_argument("--phenotype", help="MR 输出时附加的 phenotype 列值")
-    parser.add_argument("--sample-size", type=int, help="MR 输出时附加的样本量 N")
-    parser.add_argument(
-        "--mr-role",
-        choices=["out", "outcome", "exp", "exposure"],
-        help="MR 输出角色: out/outcome 或 exp/exposure；exp 会自动执行 clump",
-    )
-    parser.add_argument(
-        "--r-lib-path",
-        default=DEFAULT_R_LIB_PATH,
-        help="R 包库路径，用于加载 data.table 和 TwoSampleMR",
-    )
-    parser.add_argument("--clump-r2", type=float, default=DEFAULT_CLUMP_R2, help="Exposure clump 的 r2 阈值")
-    parser.add_argument("--clump-kb", type=int, default=DEFAULT_CLUMP_KB, help="Exposure clump 的窗口大小（kb）")
-    parser.add_argument("--clump-p1", type=float, default=DEFAULT_CLUMP_P1, help="Exposure clump 的 p 值阈值")
-    parser.add_argument("--clump-pop", default=DEFAULT_CLUMP_POP, help="Exposure clump 的参考人群")
-    parser.add_argument(
-        "--clump-plink",
-        default=DEFAULT_CLUMP_PLINK,
-        help="Exposure clump 使用的 plink 可执行文件",
-    )
-    parser.add_argument(
-        "--clump-bfile",
-        default=DEFAULT_CLUMP_BFILE,
-        help="Exposure clump 使用的 PLINK bfile 前缀",
-    )
     parser.add_argument(
         "--non-interactive",
         action="store_true",
@@ -578,7 +428,6 @@ def is_cli_mode(args: argparse.Namespace) -> bool:
     """判断当前是否使用命令行参数模式"""
     cli_fields = [
         args.input,
-        args.reference,
         args.output,
         args.mode,
         args.snp_col,
@@ -594,7 +443,6 @@ def is_cli_mode(args: argparse.Namespace) -> bool:
         args.pval_format,
         args.freq_type,
         args.freq_col,
-        args.mr_role,
     ]
     return args.non_interactive or any(value is not None for value in cli_fields)
 
@@ -620,15 +468,12 @@ def build_mapping_from_args(args: argparse.Namespace) -> ColumnMapping:
         console.print(f"[red]非交互模式缺少必要参数: {', '.join(missing)}[/red]")
         sys.exit(1)
 
-    if args.reference:
-        console.print("[yellow]--reference 已废弃，当前版本将忽略该参数。[/yellow]")
-
     if args.mode == AlleleMode.A1_A2.value and args.effect_on is None:
         console.print("[red]Mode C 需要提供 --effect-on (A1/A2)[/red]")
         sys.exit(1)
 
     if args.mode == AlleleMode.A1_A2.value and args.effect_on == "Unknown":
-        console.print("[red]Mode C 的 Unknown 方向在无 reference 模式下无法可靠解析，请显式指定 A1 或 A2。[/red]")
+        console.print("[red]Mode C 的 Unknown 方向当前无法自动解析，请显式指定 A1 或 A2。[/red]")
         sys.exit(1)
 
     if args.mode != AlleleMode.A1_A2.value and args.effect_on is not None:
@@ -715,64 +560,6 @@ def ask_input_path() -> str:
     return ask_file_path("📄 请输入 GWAS 摘要统计文件路径:", default=default_path)
 
 
-def interactive_runtime_options(input_path: str) -> Dict[str, object]:
-    """交互式询问输出格式与 clump 配置"""
-    input_name = Path(get_input_base(input_path)).name
-    output_format = ask_select(
-        "请选择输出格式:",
-        [
-            questionary.Choice("standardized (标准化 TSV)", value="standardized"),
-            questionary.Choice("mr (TwoSampleMR 友好格式)", value="mr"),
-            questionary.Choice("both (同时生成以上两种格式)", value="both"),
-        ],
-    )
-
-    runtime: Dict[str, object] = {
-        "output_format": output_format,
-        "mr_role": None,
-        "phenotype": None,
-        "sample_size": None,
-        "clump_r2": DEFAULT_CLUMP_R2,
-        "clump_kb": DEFAULT_CLUMP_KB,
-        "clump_p1": DEFAULT_CLUMP_P1,
-        "clump_pop": DEFAULT_CLUMP_POP,
-        "clump_plink": DEFAULT_CLUMP_PLINK,
-        "clump_bfile": DEFAULT_CLUMP_BFILE,
-        "r_lib_path": DEFAULT_R_LIB_PATH,
-    }
-
-    if output_format not in {"mr", "both"}:
-        return runtime
-
-    mr_role = ask_select(
-        "请选择 MR 数据角色:",
-        [
-            questionary.Choice("Outcome", value="outcome"),
-            questionary.Choice("Exposure (自动 clump)", value="exposure"),
-        ],
-    )
-    runtime["mr_role"] = mr_role
-
-    phenotype = ask_text("📛 请输入 phenotype 名称 (可留空):", default=input_name)
-    runtime["phenotype"] = phenotype or None
-
-    sample_size_text = ask_text("👥 请输入样本量 N (可留空):", default="")
-    runtime["sample_size"] = int(sample_size_text) if sample_size_text else None
-
-    if mr_role != "exposure":
-        return runtime
-
-    console.print("[bold yellow]━━━ Clump 参数配置 ━━━[/bold yellow]")
-    runtime["clump_r2"] = float(ask_text("clump_r2:", default=str(DEFAULT_CLUMP_R2)))
-    runtime["clump_kb"] = int(ask_text("clump_kb:", default=str(DEFAULT_CLUMP_KB)))
-    runtime["clump_p1"] = float(ask_text("clump_p1:", default=str(DEFAULT_CLUMP_P1)))
-    runtime["clump_pop"] = ask_text("pop:", default=DEFAULT_CLUMP_POP)
-    runtime["clump_plink"] = ask_text("plink 路径:", default=DEFAULT_CLUMP_PLINK)
-    runtime["clump_bfile"] = ask_text("clump 参考 bfile 前缀:", default=DEFAULT_CLUMP_BFILE)
-
-    return runtime
-
-
 def select_column(columns: List[str], prompt: str, allow_none: bool = False) -> Optional[str]:
     """从列名列表中选择一个列"""
     choices = list(columns)
@@ -795,7 +582,7 @@ def interactive_mapping(df: pl.DataFrame) -> ColumnMapping:
 
     console.print(Panel.fit(
         "[bold cyan]🧬 GWAS 摘要统计数据标准化工具[/bold cyan]\n"
-        "[dim]交互式列名映射 & 无 reference 标准化[/dim]",
+        "[dim]交互式列名映射与标准化[/dim]",
         border_style="cyan",
     ))
 
@@ -959,19 +746,6 @@ def add_frequency_columns(
     ])
 
 
-def normalize_mr_role(mr_role: Optional[str]) -> Optional[str]:
-    """规范化 MR 角色命名"""
-    if mr_role is None:
-        return None
-
-    role = mr_role.lower()
-    if role in ("out", "outcome"):
-        return "outcome"
-    if role in ("exp", "exposure"):
-        return "exposure"
-    raise ValueError(f"Unsupported MR role: {mr_role}")
-
-
 # ─────────────────────────────────────────────────────────────
 # QC & 数据转换
 # ─────────────────────────────────────────────────────────────
@@ -1073,7 +847,7 @@ def resolve_effect_allele(df: pl.DataFrame, mapping: ColumnMapping) -> pl.DataFr
         # Mode A: ALT 是效应等位基因
         df = df.with_columns([
             pl.col("_A2").alias("_Aeff"),  # ALT = effect
-            pl.col("_A1").alias("_Aref"),  # REF = reference
+            pl.col("_A1").alias("_Aref"),  # REF = non-effect
         ])
         df = add_frequency_columns(df, mapping)
 
@@ -1100,14 +874,14 @@ def resolve_effect_allele(df: pl.DataFrame, mapping: ColumnMapping) -> pl.DataFr
             ])
             df = add_frequency_columns(df, mapping, flip_eaf=True)
         else:
-            console.print("[red]Mode C 的 Unknown 方向在无 reference 模式下不支持。[/red]")
+            console.print("[red]Mode C 的 Unknown 方向当前不支持。[/red]")
             sys.exit(1)
 
     return df
 
 
 def canonicalize_variants(df: pl.DataFrame) -> Tuple[pl.DataFrame, ProcessingStats]:
-    """生成无 reference 版本的 canonical ID，并按位点去重。"""
+    """生成 canonical ID，并按位点去重。"""
     stats = ProcessingStats(total_input=df.height)
 
     sort_a1 = (
@@ -1154,58 +928,44 @@ def write_output(
     df: pl.DataFrame,
     output_path: str,
     mapping: ColumnMapping,
-    output_format: str = "standardized",
-    phenotype: Optional[str] = None,
-    sample_size: Optional[int] = None,
 ):
     """写出标准化结果文件"""
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     bim_id = pl.col("_BIM_ID")
     standardized_id = pl.col("_SORT_SNPID")
+    eaf_out = (
+        pl.when(pl.col("_EAF").is_null() | pl.col("_EAF").is_nan())
+        .then(pl.lit("NA"))
+        .otherwise(pl.col("_EAF").cast(pl.Utf8))
+        .alias("EAF")
+    )
+    maf_out = (
+        pl.when(pl.col("_MAF").is_null() | pl.col("_MAF").is_nan())
+        .then(pl.lit("NA"))
+        .otherwise(pl.col("_MAF").cast(pl.Utf8))
+        .alias("MAF")
+    )
     rsid_expr: Optional[pl.Expr] = None
     if "_SNP" in df.columns:
         rsid_expr = pl.col("_SNP")
 
-    # 构建最终输出列
-    if output_format == "mr_raw":
-        out_cols = [
-            bim_id.alias("bim_id"),
-            standardized_id.alias("variant_id"),
-            pl.col("_CHR").alias("chromosome"),
-            pl.col("_POS").alias("base_pair_location"),
-            pl.col("_Aeff").alias("effect_allele"),
-            pl.col("_Aref").alias("other_allele"),
-            pl.col("_EAF").alias("effect_allele_frequency"),
-            pl.col("_STAT").alias("beta"),
-            pl.col("_SE").alias("standard_error"),
-            pl.col("_P").alias("p_value"),
-        ]
-        if rsid_expr is not None:
-            out_cols.append(rsid_expr.alias("rsid"))
-        if phenotype is not None:
-            out_cols.append(pl.lit(phenotype).alias("phenotype"))
-        if sample_size is not None:
-            out_cols.append(pl.lit(sample_size).alias("N"))
-    else:
-        out_cols = [
-            bim_id.alias("BIM_ID"),
-            pl.col("_CHR").alias("CHR"),
-            pl.col("_POS").alias("POS"),
-            standardized_id.alias("VARIANT_ID"),
-        ]
-        if rsid_expr is not None:
-            out_cols.append(rsid_expr.alias("RSID"))
-        out_cols.extend([
-            pl.col("_SORT_A1").alias("ALLELE1"),
-            pl.col("_SORT_A2").alias("ALLELE2"),
-            pl.col("_Aeff").alias("EFFECT_ALLELE"),
-            pl.col("_Aref").alias("OTHER_ALLELE"),
-            pl.col("_STAT").alias("BETA"),
-            pl.col("_SE").alias("SE"),
-            pl.col("_P").alias("P"),
-            pl.col("_EAF").alias("EAF"),
-            pl.col("_MAF").alias("MAF"),
-        ])
+    out_cols = [
+        bim_id.alias("BIM_ID"),
+        pl.col("_CHR").alias("CHR"),
+        pl.col("_POS").alias("POS"),
+        standardized_id.alias("VARIANT_ID"),
+    ]
+    if rsid_expr is not None:
+        out_cols.append(rsid_expr.alias("RSID"))
+    out_cols.extend([
+        pl.col("_Aeff").alias("EFFECT_ALLELE"),
+        pl.col("_Aref").alias("OTHER_ALLELE"),
+        pl.col("_STAT").alias("BETA"),
+        pl.col("_SE").alias("SE"),
+        pl.col("_P").alias("P"),
+        eaf_out,
+        maf_out,
+    ])
 
     output = df.select(out_cols)
 
@@ -1221,131 +981,6 @@ def write_output(
 
     console.print(f"\n[green]✅ 标准化文件已输出: {output_path}[/green]")
     console.print(f"   共 {output.height:,} 个变异位点\n")
-
-
-def format_mr_output(
-    raw_output_path: str,
-    final_output_path: str,
-    mr_role: str,
-    r_lib_path: str,
-    phenotype: Optional[str],
-    sample_size: Optional[int],
-    clump_r2: float,
-    clump_kb: int,
-    clump_p1: float,
-    clump_pop: str,
-    clump_plink: str,
-    clump_bfile: str,
-):
-    """调用 R/TwoSampleMR 将中间表转换为最终 MR 输入，并在 exposure 模式下执行 clump"""
-    role = normalize_mr_role(mr_role)
-    script_path = Path(__file__).with_name("mr_format_and_clump.R")
-
-    if not script_path.exists():
-        console.print(f"[red]缺少 R 后处理脚本: {script_path}[/red]")
-        sys.exit(1)
-
-    Path(final_output_path).parent.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        "Rscript",
-        str(script_path),
-        "--r-lib-path", r_lib_path,
-        "--input", raw_output_path,
-        "--output", final_output_path,
-        "--mr-role", role,
-        "--clump-r2", str(clump_r2),
-        "--clump-kb", str(clump_kb),
-        "--clump-p1", str(clump_p1),
-        "--clump-pop", clump_pop,
-        "--plink", clump_plink,
-        "--bfile", clump_bfile,
-    ]
-
-    if phenotype is not None:
-        cmd.extend(["--phenotype", phenotype])
-    if sample_size is not None:
-        cmd.extend(["--sample-size", str(sample_size)])
-
-    console.print(
-        f"[cyan]🔧 正在调用 TwoSampleMR 生成 {role} 数据"
-        + (" 并执行 clump..." if role == "exposure" else "...") 
-        + "[/cyan]"
-    )
-
-    try:
-        completed = subprocess.run(
-            cmd,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        if exc.stdout:
-            console.print(exc.stdout)
-        if exc.stderr:
-            console.print(f"[red]{exc.stderr}[/red]")
-        sys.exit(1)
-
-    if completed.stdout.strip():
-        console.print(completed.stdout.strip())
-    if completed.stderr.strip():
-        console.print(f"[yellow]{completed.stderr.strip()}[/yellow]")
-
-
-def write_mr_ready_output(
-    df: pl.DataFrame,
-    output_path: str,
-    mapping: ColumnMapping,
-    mr_role: str,
-    r_lib_path: str,
-    phenotype: Optional[str],
-    sample_size: Optional[int],
-    clump_r2: float,
-    clump_kb: int,
-    clump_p1: float,
-    clump_pop: str,
-    clump_plink: str,
-    clump_bfile: str,
-) -> None:
-    """写出 MR 中间表并调用 R 转为 TwoSampleMR 输入格式。"""
-    console.print("[cyan]🔧 正在写出 MR 中间结果...[/cyan]")
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    tmp_file = tempfile.NamedTemporaryFile(
-        suffix=".mr_raw.tsv.gz",
-        prefix="standardlizer_",
-        dir=str(Path(output_path).parent),
-        delete=False,
-    )
-    tmp_output_path = tmp_file.name
-    tmp_file.close()
-
-    try:
-        write_output(
-            df,
-            tmp_output_path,
-            mapping,
-            output_format="mr_raw",
-            phenotype=phenotype,
-            sample_size=sample_size,
-        )
-        format_mr_output(
-            tmp_output_path,
-            output_path,
-            mr_role=mr_role,
-            r_lib_path=r_lib_path,
-            phenotype=phenotype,
-            sample_size=sample_size,
-            clump_r2=clump_r2,
-            clump_kb=clump_kb,
-            clump_p1=clump_p1,
-            clump_pop=clump_pop,
-            clump_plink=clump_plink,
-            clump_bfile=clump_bfile,
-        )
-    finally:
-        if os.path.exists(tmp_output_path):
-            os.remove(tmp_output_path)
 
 
 def generate_report(
@@ -1375,7 +1010,7 @@ def generate_report(
 
     lines = [
         "=" * 60,
-        "GWAS Standardizer - 无 reference 审计报告",
+        "GWAS Standardizer 审计报告",
         "=" * 60,
         f"时间: {timestamp}",
         f"输入文件: {input_path}",
@@ -1384,7 +1019,7 @@ def generate_report(
         f"初始输入变异总数:           {stats.total_input:>10,}",
         f"QC 不达标剔除:              {stats.qc_failed:>10,}",
         f"去重剔除:                   {stats.duplicates_removed:>10,}",
-        f"仅有 MAF 无法转 EAF:        {stats.maf_without_eaf:>10,}",
+        f"仅有 MAF 待后续注释:        {stats.maf_without_eaf:>10,}",
         f"EAF 缺失位点数:             {stats.eaf_missing:>10,}",
         "-" * 60,
         f"最终输出变异总数:           {stats.total_output:>10,}",
@@ -1421,67 +1056,21 @@ def main():
     # ── Step 1: 获取文件路径 ──
     console.print("[bold yellow]━━━ 文件路径配置 ━━━[/bold yellow]")
     cli_mode = is_cli_mode(args)
-    output_format = args.output_format
-    mr_role = args.mr_role
-    phenotype = args.phenotype
-    sample_size = args.sample_size
-    r_lib_path = args.r_lib_path
-    clump_r2 = args.clump_r2
-    clump_kb = args.clump_kb
-    clump_p1 = args.clump_p1
-    clump_pop = args.clump_pop
-    clump_plink = args.clump_plink
-    clump_bfile = args.clump_bfile
 
     if cli_mode:
         mapping = build_mapping_from_args(args)
         input_path = args.input or ""
-        if output_format in {"mr", "both"} and mr_role is None:
-            console.print("[red]--output-format mr/both 时必须提供 --mr-role out/exp[/red]")
-            sys.exit(1)
-
-        output_paths = resolve_output_paths(
-            input_path,
-            args.output,
-            output_format=output_format,
-            mr_role=mr_role,
-        )
+        output_path = resolve_output_path(input_path, args.output)
         if not os.path.isfile(input_path):
             console.print(f"[red]输入文件不存在: {input_path}[/red]")
             sys.exit(1)
     else:
         input_path = ask_input_path()
-        runtime = interactive_runtime_options(input_path)
-        output_format = str(runtime["output_format"])
-        mr_role = runtime["mr_role"]
-        phenotype = runtime["phenotype"]
-        sample_size = runtime["sample_size"]
-        r_lib_path = str(runtime["r_lib_path"])
-        clump_r2 = float(runtime["clump_r2"])
-        clump_kb = int(runtime["clump_kb"])
-        clump_p1 = float(runtime["clump_p1"])
-        clump_pop = str(runtime["clump_pop"])
-        clump_plink = str(runtime["clump_plink"])
-        clump_bfile = str(runtime["clump_bfile"])
-        if output_format == "both":
-            console.print("[dim]留空则分别使用 STANDARDIZED_OUTPUT_DIR 和 EXP/OUT_OUTPUT_DIR。[/dim]")
-            output_input = ask_output_path(
-                "",
-                prompt="📁 请输入输出目录或文件名前缀:",
-            )
-        else:
-            output_default = derive_default_output_path(input_path, output_format=output_format, mr_role=mr_role)
-            output_input = ask_output_path(output_default)
-        output_paths = resolve_output_paths(input_path, output_input, output_format=output_format, mr_role=mr_role)
+        output_default = derive_default_output_path(input_path)
+        output_input = ask_output_path(output_default)
+        output_path = resolve_output_path(input_path, output_input)
 
-    primary_output_path = output_paths.get("mr") or output_paths.get("standardized") or next(iter(output_paths.values()))
-    if len(output_paths) == 1:
-        console.print(f"  📂 输出文件: [green]{primary_output_path}[/green]\n")
-    else:
-        console.print("  📂 输出文件:")
-        for label, path in output_paths.items():
-            console.print(f"     {label}: [green]{path}[/green]")
-        console.print()
+    console.print(f"  📂 输出文件: [green]{output_path}[/green]\n")
 
     read_input_path = input_path
     input_separator = detect_separator(input_path)
@@ -1493,7 +1082,7 @@ def main():
         )
         normalized_input_path = normalize_whitespace_delimited_file(
             input_path,
-            str(Path(primary_output_path).parent),
+            str(Path(output_path).parent),
         )
         read_input_path = normalized_input_path
         input_separator = "\t"
@@ -1539,44 +1128,22 @@ def main():
         if stats.maf_without_eaf > 0:
             console.print(
                 f"[yellow]⚠ 检测到 {stats.maf_without_eaf:,} 个位点只有 MAF，"
-                "在无 reference 模式下无法可靠转换为 EAF；MR 输出中的 effect_allele_frequency 将为空。[/yellow]\n"
+                "标准化阶段不会直接把 MAF 转成 EAF；如需补充 EAF，请在后续运行 annotate_eaf.sh。[/yellow]\n"
             )
 
         # ── Step 7: 输出 ──
-        if "standardized" in output_paths:
-            console.print("[cyan]🔧 正在写出标准化结果...[/cyan]")
-            write_output(
-                df_aligned,
-                output_paths["standardized"],
-                mapping,
-                output_format="standardized",
-                phenotype=phenotype,
-                sample_size=sample_size,
-            )
-
-        if "mr" in output_paths:
-            write_mr_ready_output(
-                df_aligned,
-                output_paths["mr"],
-                mapping,
-                mr_role=mr_role or "outcome",
-                r_lib_path=r_lib_path,
-                phenotype=phenotype,
-                sample_size=sample_size,
-                clump_r2=clump_r2,
-                clump_kb=clump_kb,
-                clump_p1=clump_p1,
-                clump_pop=clump_pop,
-                clump_plink=clump_plink,
-                clump_bfile=clump_bfile,
-            )
+        console.print("[cyan]🔧 正在写出标准化结果...[/cyan]")
+        write_output(
+            df_aligned,
+            output_path,
+            mapping,
+        )
 
         # ── Step 8: 报告 ──
         generate_report(
             stats,
-            primary_output_path,
+            output_path,
             input_path,
-            output_paths=list(output_paths.values()),
         )
     finally:
         if normalized_input_path and os.path.exists(normalized_input_path):

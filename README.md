@@ -15,6 +15,7 @@ MR_GWAS_Pipeline/
 ├── config/
 ├── data/
 │   ├── Org/
+│   ├── reference/
 │   ├── standardized/
 │   ├── exp/
 │   └── out/
@@ -47,24 +48,16 @@ R 包不再由项目自动安装。需要的包名清单见 [config/r_packages.t
 - `EXP_OUTPUT_DIR`
 - `OUT_OUTPUT_DIR`
 - `RESULTS_DIR`
+- `REFERENCE_DIR`
 - `PLINK_BIN`
 - `CLUMP_BFILE`
+- `FRQ_REFERENCE`
 - `CLUMP_R2`
 - `CLUMP_KB`
 - `CLUMP_P1`
 - `CLUMP_POP`
 
 ## 快速开始
-
-### Docker 方式
-
-如果服务器上 R 包安装成本较高，推荐直接构建 Docker 镜像：
-
-```bash
-docker build -t mr-gwas-pipeline:latest .
-```
-
-Docker 镜像内会安装 Python、R、PLINK 和 MR 相关 R 包；GWAS 数据、reference bfile 和结果目录通过 volume 挂载，不打进镜像。详细命令见 [docs/Docker使用说明.md](docs/Docker使用说明.md)。
 
 ### 1. 安装 Python 依赖
 
@@ -84,17 +77,15 @@ data/Org/
 
 交互模式下，标准化脚本会优先把这个目录作为输入路径提示。
 
-### 3. 标准化 outcome GWAS
+### 3. 标准化原始 GWAS
 
-如果不加 `--non-interactive`，脚本会进入交互模式。现在对于 exposure 的 clump 参数也会在交互过程中询问，并自动带出 `config/defaults.env` 里的默认值。
+第一步只做标准化，统一生成 `data/standardized/*.tsv.gz`。同一个标准化文件后续可以重复转换成 exposure 或 outcome。
 
 ```bash
 bash bin/standardize_gwas.sh \
   --non-interactive \
-  --input /path/to/outcome.tsv.gz \
-  --output /home/ding/MR_GWAS_Pipeline/data/out/HF.csv \
-  --output-format mr \
-  --mr-role out \
+  --input /path/to/gwas.tsv.gz \
+  --output /home/ding/MR_GWAS_Pipeline/data/standardized/EXPO.tsv.gz \
   --mode B \
   --snp-col variant_id \
   --chr-col chromosome \
@@ -107,14 +98,81 @@ bash bin/standardize_gwas.sh \
   --p-col p_value \
   --pval-format raw \
   --freq-type EAF \
-  --freq-col effect_allele_frequency \
-  --phenotype HF \
-  --sample-size 344182
+  --freq-col effect_allele_frequency
 ```
 
-### 4. 标准化 exposure GWAS 并自动 clump
+### 4. 如有需要，为缺失 EAF 做 MAF 定向注释
 
-`--mr-role exp` 会自动执行 `clump_data()`，并使用 `bim_id` 作为 `SNP` 与参考 `.bim` 对接。非 `--non-interactive` 模式下会交互式询问：
+如果某个 GWAS 只提供 `MAF`，标准化阶段会保留 `MAF` 并让 `EAF=NA`。这时可以先从 1KG bfile 生成频率参考：
+
+```bash
+bash bin/build_1kg_frq_reference.sh
+```
+
+默认会使用 `CLUMP_BFILE`，输出：
+
+```text
+data/reference/g1000_eur_colon.frq
+data/reference/g1000_eur_colon.frq.tsv.gz
+```
+
+然后对标准化文件补 EAF：
+
+```bash
+bash bin/annotate_eaf.sh \
+  --non-interactive \
+  --input data/standardized/EXPO.tsv.gz \
+  --frq data/reference/g1000_eur_colon.frq.tsv.gz
+```
+
+该步骤默认直接替换原标准化文件，并额外生成：
+
+- `*.eaf_matched.tsv.gz`: 仅包含 `BIM_ID` 匹配到 1KG `.frq` 的行
+- `*.eaf_frequency_diff.tsv.gz`: `EAF_1KG` 与 `EAF_FROM_MAF` 差异超过阈值的位点
+- `*.eaf_annotation.log`: 匹配数、注释数和频率差异统计
+
+注释后的标准化文件会新增：
+
+- `EAF_1KG`: 使用 1KG `.frq` 的 A1/A2/MAF 定向到 `EFFECT_ALLELE` 的频率
+- `EAF_FROM_MAF`: 使用原 GWAS 文件的 `MAF`，再按 1KG A1/A2 定向到 `EFFECT_ALLELE` 的频率
+- `EAF_ABS_DIFF`: `EAF_1KG` 和 `EAF_FROM_MAF` 的绝对差
+
+### 5. 转换成 exposure 或 outcome
+
+第二步从 `data/standardized` 中读取文件，生成 TwoSampleMR 输入。`role=exposure` 会先按 `clump_p1` 预筛候选位点，再调用 PLINK clump；`role=outcome` 只做格式转换。
+
+生成 outcome：
+
+```bash
+bash bin/format_tsmr.sh \
+  --non-interactive \
+  --input data/standardized/EXPO.tsv.gz \
+  --output data/out/EXPO_outcome.csv \
+  --role outcome \
+  --phenotype EXPO
+```
+
+生成 exposure：
+
+```bash
+bash bin/format_tsmr.sh \
+  --non-interactive \
+  --input data/standardized/EXPO.tsv.gz \
+  --output data/exp/EXPO_exposure.csv \
+  --role exposure \
+  --phenotype EXPO \
+  --clump-r2 0.1 \
+  --clump-kb 500 \
+  --clump-p1 5e-8
+```
+
+如果 exposure 只希望在指定基因/染色体区间内 clump，可以加：
+
+```bash
+--region 1:55000000-56000000
+```
+
+非 `--non-interactive` 模式下，`format_tsmr.sh` 会交互式询问：
 
 - `clump_r2`
 - `clump_kb`
@@ -123,44 +181,13 @@ bash bin/standardize_gwas.sh \
 - `plink` 路径
 - `clump` 参考 `bfile` 前缀
 
-```bash
-bash bin/standardize_gwas.sh \
-  --non-interactive \
-  --input /path/to/exposure.tsv.gz \
-  --output-format mr \
-  --mr-role exp \
-  --mode B \
-  --snp-col variant_id \
-  --chr-col chromosome \
-  --pos-col base_pair_location \
-  --allele1-col effect_allele \
-  --allele2-col other_allele \
-  --stat-type BETA \
-  --stat-col beta \
-  --se-col standard_error \
-  --p-col p_value \
-  --pval-format raw \
-  --freq-type EAF \
-  --freq-col effect_allele_frequency \
-  --phenotype EXPO \
-  --sample-size 344182
-```
-
 如果不显式写 `--output`，脚本会优先使用 `config/defaults.env` 中的输出目录：
 
 - `STANDARDIZED_OUTPUT_DIR`
 - `OUT_OUTPUT_DIR`
 - `EXP_OUTPUT_DIR`
 
-如果需要同时生成标准化 TSV 和 MR-ready CSV，可以使用：
-
-```bash
---output-format both
-```
-
-此时必须同时提供 `--mr-role out` 或 `--mr-role exp`。不传 `--output` 时，标准化 TSV 会写入 `STANDARDIZED_OUTPUT_DIR`，MR-ready 文件会写入 `OUT_OUTPUT_DIR` 或 `EXP_OUTPUT_DIR`；如果 `--output` 传入目录，两种文件都会写到该目录。
-
-### 5. 运行 MR 分析
+### 6. 运行 MR 分析
 
 将 `EXP_OUTPUT_DIR` 和 `OUT_OUTPUT_DIR` 对应目录中的文件准备好之后，运行：
 
@@ -195,16 +222,15 @@ results/EXPO_HF/
 
 标准化 TSV 额外会保留：
 
-- `ALLELE1` / `ALLELE2`: 字典序排序后的两条等位基因
 - `EFFECT_ALLELE` / `OTHER_ALLELE`: 效应统计量实际对应的等位基因方向
-- `EAF` / `MAF`: 能解析时分别保留；如果输入只有 `MAF`，无 reference 模式下 `EAF` 可能为空
+- `EAF` / `MAF`: 能解析时分别保留；缺失值显式写为 `NA`
+- `EAF_1KG` / `EAF_FROM_MAF` / `EAF_ABS_DIFF`: 仅在运行 EAF 注释脚本后出现，用于记录 MAF 定向注释结果
 
-## 无 Reference 的边界
+## 标准化边界
 
-- 不再依赖 external reference panel。
 - `Mode C (A1/A2)` 必须显式提供效应方向是 `A1` 还是 `A2`；`Unknown` 不再支持。
-- 如果输入只有 `MAF` 而不是 allele-specific frequency，脚本不会强行把它转换成 `EAF`；MR-ready 输出中的 `effect_allele_frequency` 会留空。
-- 不再做 panel-based strand flip、回文位点消歧和方向纠正，这些会留给下游 `harmonise_data()` 或直接作为限制接受。
+- 如果输入只有 `MAF` 而不是 allele-specific frequency，标准化脚本不会强行把它转换成 `EAF`；可在标准化后运行 `bin/annotate_eaf.sh` 用 1KG A1/A2 为 `MAF` 定向。
+- 标准化脚本本身不做 panel-based strand flip、回文位点消歧和方向纠正；这些会留给后续注释步骤或下游 `harmonise_data()`。
 
 ## Git 管理建议
 

@@ -133,6 +133,27 @@ fmt_sci <- function(x, digits = 2) {
   ifelse(is.na(x), "NA", formatC(x, digits = digits, format = "e"))
 }
 
+# 安全提取标量数值；缺失或长度不足时返回 NA
+safe_num_scalar <- function(x, index = 1) {
+  if (is.null(x) || length(x) < index) {
+    return(NA_real_)
+  }
+  value <- suppressWarnings(as.numeric(x[[index]]))
+  if (length(value) == 0) {
+    return(NA_real_)
+  }
+  value[[1]]
+}
+
+# MR-PRESSO 常见是优先取第2行(校正后)，没有则退回第1行(原始)
+prefer_second_num <- function(x) {
+  second <- safe_num_scalar(x, 2)
+  if (!is.na(second)) {
+    return(second)
+  }
+  safe_num_scalar(x, 1)
+}
+
 # 写入制表符分隔文件
 write_txt <- function(df, path) {
   fwrite(df, file = path, sep = "\t", na = "NA", quote = FALSE)
@@ -247,7 +268,9 @@ run_mr_analysis <- function(exp_name, out_name) {
   }, error = function(e) NULL)
   
   if (!is.null(MrPressoRes)) {
-    mr_presso_global_p_raw <- MrPressoRes$`MR-PRESSO results`$`Global Test`$Pvalue
+    mr_presso_global_p_raw <- safe_num_scalar(
+      MrPressoRes$`MR-PRESSO results`$`Global Test`$Pvalue
+    )
     
     # 检查是否有离群值
     outliers <- MrPressoRes$`MR-PRESSO results`$`Distortion Test`$`Outliers Indices`
@@ -275,8 +298,12 @@ run_mr_analysis <- function(exp_name, out_name) {
       
       if (!is.null(MrPressoRes)) {
         # 第二轮全局P值(去除离群值后)
-        mr_presso_global_p_clean <- MrPressoRes$`MR-PRESSO results`$`Global Test`$Pvalue
-        mr_presso_distortion_p <- MrPressoRes$`MR-PRESSO results`$`Distortion Test`$Pvalue
+        mr_presso_global_p_clean <- safe_num_scalar(
+          MrPressoRes$`MR-PRESSO results`$`Global Test`$Pvalue
+        )
+        mr_presso_distortion_p <- safe_num_scalar(
+          MrPressoRes$`MR-PRESSO results`$`Distortion Test`$Pvalue
+        )
       }
     } else {
       cat("  未检测到离群值\n")
@@ -347,15 +374,9 @@ run_mr_analysis <- function(exp_name, out_name) {
   # 添加MR-PRESSO结果(校正后)
   if (mr_presso_ok && !is.null(MrPressoRes)) {
     # 优先使用校正后结果
-    mr_presso_beta <- ifelse(is.na(MrPressoRes$`Main MR results`$`Causal Estimate`[2]),
-                              MrPressoRes$`Main MR results`$`Causal Estimate`[1],
-                              MrPressoRes$`Main MR results`$`Causal Estimate`[2])
-    mr_presso_se <- ifelse(is.na(MrPressoRes$`Main MR results`$Sd[2]),
-                            MrPressoRes$`Main MR results`$Sd[1],
-                            MrPressoRes$`Main MR results`$Sd[2])
-    mr_presso_pval <- ifelse(is.na(MrPressoRes$`Main MR results`$`P-value`[2]),
-                              MrPressoRes$`Main MR results`$`P-value`[1],
-                              MrPressoRes$`Main MR results`$`P-value`[2])
+    mr_presso_beta <- prefer_second_num(MrPressoRes$`Main MR results`$`Causal Estimate`)
+    mr_presso_se <- prefer_second_num(MrPressoRes$`Main MR results`$Sd)
+    mr_presso_pval <- prefer_second_num(MrPressoRes$`Main MR results`$`P-value`)
     
     Res <- rbind(Res, data.frame(
       method = "MR-PRESSO",
@@ -544,7 +565,7 @@ run_mr_analysis <- function(exp_name, out_name) {
     paste0("  多效性检验 (Egger截距): intercept = ", fmt_num(Ple$egger_intercept[1], 4),
            ", P = ", fmt_sci(Ple$pval[1], 2)),
     paste0("  MR-PRESSO全局检验(去除离群值后): P = ", fmt_sci(mr_presso_global_p_clean, 2)),
-    if (!is.na(mr_presso_distortion_p)) paste0("  MR-PRESSO扭曲检验: P = ", fmt_sci(mr_presso_distortion_p, 2)) else NULL,
+    if (length(mr_presso_distortion_p) == 1 && !is.na(mr_presso_distortion_p)) paste0("  MR-PRESSO扭曲检验: P = ", fmt_sci(mr_presso_distortion_p, 2)) else NULL,
     "",
     if (use_steiger) "八、输出文件" else "七、输出文件",
     "--------------------------------------------------------------------------------",
