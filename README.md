@@ -1,9 +1,10 @@
 # MR_GWAS_Pipeline
 
-这是一个可独立运行、可用 `git` 管理的 MR 分析项目骨架，包含两部分核心能力：
+这是一个可独立运行、可用 `git` 管理的 MR 分析项目骨架，包含三部分核心能力：
 
 1. GWAS 摘要统计标准化与 canonical 位点 ID 生成。
 2. 基于 `TwoSampleMR` 的单暴露单结局 MR 分析。
+3. 基于 `TwoSampleMR + MVMR` 的 `X-M-Y` 中介 MVMR 分析。
 
 项目已经按当前机器环境整理好默认配置，代码、配置、文档可以直接纳入 `git`；原始数据、临时文件和结果文件默认被 `.gitignore` 排除。
 
@@ -211,6 +212,43 @@ results/EXPO_HF/
 - `scatter.png`
 - `funnel.png`
 - `leaveoneout.png`
+
+### 7. 运行 X-M-Y 中介 MVMR
+
+新入口会交互式逐项询问：
+
+- `X` 对应的 exposure 文件，固定从 `data/exp/` 选择
+- `M` 对应的 exposure 文件，固定从 `data/exp/` 选择
+- `X / M / Y` 对应的 standardized `.gz` 文件，固定从 `data/standardized/` 选择
+- `X / M / Y` 的展示名称
+- 结果输出目录
+
+然后会把选项完整列出，确认后开始分析：
+
+```bash
+bash bin/run_mvmr_mediation.sh
+```
+
+该流程当前约定：
+
+- `X/M` 的 IV 清单来自各自的 exposure 文件，并取 SNP 并集
+- `X/M/Y` 的 `beta/se/alleles/eaf` 从 standardized 文件中提取
+- `X-Y` 与 `M-Y` 的方向协调使用 `TwoSampleMR::harmonise_data()`
+- `MVMR` 部分使用 `MVMR::format_mvmr()`、`strength_mvmr()`、`pleiotropy_mvmr()`、`ivw_mvmr()`
+
+输出目录下会生成：
+
+- `iv_union.txt`
+- `mvmr_input.txt`
+- `harmonised_xy_*.txt`
+- `harmonised_my_*.txt`
+- `harmonised_total_xm_*.txt`
+- `harmonised_total_xy_*.txt`
+- `mvmr_strength.txt`
+- `mvmr_pleiotropy.txt`
+- `mvmr_ivw.txt`
+- `mediation_summary.txt`
+- `report.txt`
 
 ## ID 规则
 
