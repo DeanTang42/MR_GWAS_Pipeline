@@ -5,6 +5,7 @@
 1. GWAS 摘要统计标准化与 canonical 位点 ID 生成。
 2. 基于 `TwoSampleMR` 的单暴露单结局 MR 分析。
 3. 基于 `TwoSampleMR + MVMR` 的 `X-M-Y` 中介 MVMR 分析。
+4. 可配置 exposure 数量的通用 MVMR 分析。
 
 项目已经按当前机器环境整理好默认配置，代码、配置、文档可以直接纳入 `git`；原始数据、临时文件和结果文件默认被 `.gitignore` 排除。
 
@@ -248,6 +249,40 @@ bash bin/run_mvmr_mediation.sh
 - `mvmr_pleiotropy.txt`
 - `mvmr_ivw.txt`
 - `mediation_summary.txt`
+- `report.txt`
+
+### 8. 运行可配置 exposure 数量的通用 MVMR
+
+如果你希望一次纳入 2 个以上 exposure，而不是固定 `X-M-Y` 中介结构，使用：
+
+```bash
+bash bin/run_mvmr.sh
+```
+
+交互流程会先询问：
+
+- 需要纳入的 exposure 数量
+- 每个 exposure 对应的 `data/exp/` 文件
+- 每个 exposure 对应的 `data/standardized/` 文件
+- outcome 对应的 `data/standardized/` 文件
+- 最终输出目录
+
+该流程的规则是：
+
+- 所有 exposure 的 IV 先取 SNP 并集
+- 每个 exposure 都分别和 outcome 做一次 `harmonise_data(action = 2)`
+- 以第 1 个 exposure 为锚点统一 outcome 方向
+- 如果其他 exposure 的方向与锚点相反，则自动翻转对应 beta 后保留
+
+输出目录下会生成：
+
+- `iv_union.txt`
+- `pairwise_harmonise_summary.txt`
+- `orientation_summary.txt`
+- `mvmr_input.txt`
+- `mvmr_strength.txt`
+- `mvmr_pleiotropy.txt`
+- `mvmr_ivw.txt`
 - `report.txt`
 
 ## ID 规则
