@@ -59,6 +59,8 @@ R 包不再由项目自动安装。需要的包名清单见 [config/r_packages.t
 - `CLUMP_P1`
 - `CLUMP_POP`
 
+如果你在服务器上有本地专用路径，不建议直接改 `defaults.env`。现在所有 `bin/*.sh` 都会在读取 `defaults.env` 后，再额外读取未纳入 git 的 `config/defaults.local.env`。
+
 ## 快速开始
 
 ### 1. 安装 Python 依赖

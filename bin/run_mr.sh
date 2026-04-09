@@ -3,10 +3,15 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_FILE="${PROJECT_DIR}/config/defaults.env"
+CONFIG_LOCAL_FILE="${PROJECT_DIR}/config/defaults.local.env"
 
 if [[ -f "${CONFIG_FILE}" ]]; then
     # shellcheck source=/dev/null
     source "${CONFIG_FILE}"
+fi
+if [[ -f "${CONFIG_LOCAL_FILE}" ]]; then
+    # shellcheck source=/dev/null
+    source "${CONFIG_LOCAL_FILE}"
 fi
 
 R_LIB_PATH="${R_LIB_PATH:-/home/ding/R/4.4.1_MR}"

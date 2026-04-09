@@ -33,3 +33,5 @@ logs/*
 *.nosex
 *.clumped
 *.tmp
+
+config/defaults.local.env
