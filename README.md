@@ -235,6 +235,7 @@ bash bin/run_mvmr_mediation.sh
 - `X/M` 的 IV 清单来自各自的 exposure 文件，并取 SNP 并集
 - `X/M/Y` 的 `beta/se/alleles/eaf` 从 standardized 文件中提取
 - `X-Y` 与 `M-Y` 的方向协调使用 `TwoSampleMR::harmonise_data()`
+- 在进入 `format_mvmr()` 前，会对协调后的最终 MVMR SNP list 再做一次全局 clump
 - `MVMR` 部分使用 `MVMR::format_mvmr()`、`strength_mvmr()`、`pleiotropy_mvmr()`、`ivw_mvmr()`
 
 输出目录下会生成：
@@ -273,6 +274,7 @@ bash bin/run_mvmr.sh
 - 每个 exposure 都分别和 outcome 做一次 `harmonise_data(action = 2)`
 - 以第 1 个 exposure 为锚点统一 outcome 方向
 - 如果其他 exposure 的方向与锚点相反，则自动翻转对应 beta 后保留
+- 在进入 `format_mvmr()` 前，会对协调后的最终 MVMR SNP list 再做一次全局 clump
 
 输出目录下会生成：
 

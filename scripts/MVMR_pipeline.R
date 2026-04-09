@@ -127,6 +127,11 @@ exposure_dir <- Sys.getenv(
   unset = Sys.getenv("MR_PIPELINE_EXPOSURE_DIR", unset = file.path(project_dir, "data", "exp"))
 )
 result_dir <- normalizePath(cli$output_dir, mustWork = FALSE)
+clump_plink <- Sys.getenv("MR_PIPELINE_MVMR_CLUMP_PLINK", unset = "/home/ding/miniconda3/envs/GWAS/bin/plink")
+clump_bfile <- Sys.getenv("MR_PIPELINE_MVMR_CLUMP_BFILE", unset = "/home/ding/MR_LPA/Ref/g1000_eur/g1000_eur_colon")
+clump_r2 <- as.numeric(Sys.getenv("MR_PIPELINE_MVMR_CLUMP_R2", unset = "0.01"))
+clump_kb <- as.numeric(Sys.getenv("MR_PIPELINE_MVMR_CLUMP_KB", unset = "1000"))
+clump_p1 <- as.numeric(Sys.getenv("MR_PIPELINE_MVMR_CLUMP_P1", unset = "1"))
 
 safe_num_scalar <- function(x, index = 1) {
   if (is.null(x) || length(x) < index) {
@@ -154,6 +159,48 @@ slugify <- function(x) {
 
 write_txt <- function(df, path) {
   fwrite(df, file = path, sep = "\t", na = "NA", quote = FALSE)
+}
+
+parse_clumped_snps <- function(path) {
+  if (!file.exists(path) || file.info(path)$size <= 0) {
+    return(character())
+  }
+  clumped <- fread(path, fill = TRUE)
+  if (!"SNP" %in% names(clumped)) {
+    return(character())
+  }
+  unique(toupper(as.character(clumped$SNP)))
+}
+
+run_global_clump <- function(input_dt, out_dir, prefix = "global_clump") {
+  clump_input_path <- file.path(out_dir, paste0(prefix, "_input.txt"))
+  clump_out_prefix <- file.path(out_dir, prefix)
+  write_txt(input_dt, clump_input_path)
+
+  cmd <- c(
+    "--bfile", clump_bfile,
+    "--clump", clump_input_path,
+    "--clump-snp-field", "SNP",
+    "--clump-field", "P",
+    "--clump-kb", as.character(clump_kb),
+    "--clump-r2", as.character(clump_r2),
+    "--clump-p1", as.character(clump_p1),
+    "--out", clump_out_prefix
+  )
+  output <- system2(clump_plink, args = cmd, stdout = TRUE, stderr = TRUE)
+  status <- attr(output, "status")
+  if (is.null(status)) {
+    status <- 0L
+  }
+  writeLines(output, paste0(clump_out_prefix, ".log"))
+  if (status != 0L) {
+    stop("PLINK global clump 失败，请检查: ", paste0(clump_out_prefix, ".log"), call. = FALSE)
+  }
+  lead_snps <- parse_clumped_snps(paste0(clump_out_prefix, ".clumped"))
+  if (length(lead_snps) == 0) {
+    stop("全局 clump 未返回 lead SNP，请检查: ", paste0(clump_out_prefix, ".clumped"), call. = FALSE)
+  }
+  lead_snps
 }
 
 fmt_num <- function(x, digits = 4) {
@@ -347,6 +394,7 @@ for (i in seq_len(exp_n)) {
     SNP,
     betaX = beta.exposure,
     sebetaX = se.exposure,
+    pX = pval.exposure,
     effect_allele_y_cur = effect_allele.outcome,
     other_allele_y_cur = other_allele.outcome
   )]
@@ -373,7 +421,7 @@ for (i in seq_len(exp_n)) {
     orientation_opposite_n = sum(mvmr_input[[relation_col]] == "opposite", na.rm = TRUE),
     orientation_mismatch_n = sum(mvmr_input[[relation_col]] == "mismatch", na.rm = TRUE)
   )
-  setnames(mvmr_input, c("betaX", "sebetaX"), c(paste0("betaX", i), paste0("sebetaX", i)))
+  setnames(mvmr_input, c("betaX", "sebetaX", "pX"), c(paste0("betaX", i), paste0("sebetaX", i), paste0("pX", i)))
   mvmr_input[, c("effect_allele_y_cur", "other_allele_y_cur") := NULL]
 }
 
@@ -392,9 +440,28 @@ if (nrow(mvmr_input) == 0) {
 
 mvmr_input <- merge(mvmr_input, iv_sources, by = "SNP", all.x = TRUE)
 mvmr_input <- merge(mvmr_input, meta_dt, by = "SNP", all.x = TRUE)
-setcolorder(mvmr_input, c("SNP", "variant_id", "rsid", "iv_sources", setdiff(names(mvmr_input), c("SNP", "variant_id", "rsid", "iv_sources"))))
+
+p_cols <- paste0("pX", seq_len(exp_n))
+p_matrix <- as.matrix(mvmr_input[, ..p_cols])
+storage.mode(p_matrix) <- "numeric"
+p_matrix[is.na(p_matrix)] <- Inf
+p_clump <- apply(p_matrix, 1, min)
+p_clump[!is.finite(p_clump)] <- 1
+mvmr_input[, p_clump := p_clump]
+
+setcolorder(mvmr_input, c("SNP", "variant_id", "rsid", "iv_sources", "p_clump", setdiff(names(mvmr_input), c("SNP", "variant_id", "rsid", "iv_sources", "p_clump"))))
+write_txt(mvmr_input, file.path(result_dir, "pre_clump_mvmr_input.txt"))
+
+pre_clump_n <- nrow(mvmr_input)
+lead_snps <- run_global_clump(mvmr_input[, .(SNP, P = p_clump)], result_dir, prefix = "global_clump")
+write_txt(merge(data.table(SNP = sort(unique(lead_snps))), mvmr_input[, .(SNP, variant_id, rsid, iv_sources, p_clump)], by = "SNP", all.x = TRUE), file.path(result_dir, "global_clump_leads.txt"))
+write_txt(mvmr_input[!SNP %in% lead_snps, .(SNP, variant_id, rsid, iv_sources, p_clump)], file.path(result_dir, "global_clump_removed.txt"))
+mvmr_input <- mvmr_input[SNP %in% lead_snps]
+post_clump_n <- nrow(mvmr_input)
+write_txt(mvmr_input, file.path(result_dir, "post_clump_mvmr_input.txt"))
 write_txt(mvmr_input, file.path(result_dir, "mvmr_input.txt"))
-cat("  MVMR 最终输入 SNP 数:", nrow(mvmr_input), "\n")
+cat("  协调后待全局 clump SNP 数:", pre_clump_n, "\n")
+cat("  全局 clump 后保留 SNP 数:", post_clump_n, "\n")
 
 bx_cols <- paste0("betaX", seq_len(exp_n))
 sebx_cols <- paste0("sebetaX", seq_len(exp_n))
@@ -459,7 +526,9 @@ report_lines <- c(
            ", opposite=", orientation_dt[exposure_index == i, orientation_opposite_n],
            ", mismatch=", orientation_dt[exposure_index == i, orientation_mismatch_n])
   }, character(1)),
-  paste0("  MVMR 最终输入 SNP 数: ", nrow(mvmr_input)),
+  paste0("  协调后待全局 clump SNP 数: ", pre_clump_n),
+  paste0("  全局 clump 参数: r2=", clump_r2, ", kb=", clump_kb, ", p1=", clump_p1),
+  paste0("  全局 clump 后最终 SNP 数: ", post_clump_n),
   "",
   "四、条件工具强度",
   "--------------------------------------------------------------------------------",
@@ -484,6 +553,10 @@ report_lines <- c(
   paste0("  IV 并集: ", file.path(result_dir, "iv_union.txt")),
   paste0("  Pairwise 协调汇总: ", file.path(result_dir, "pairwise_harmonise_summary.txt")),
   paste0("  方向汇总: ", file.path(result_dir, "orientation_summary.txt")),
+  paste0("  全局 clump 输入: ", file.path(result_dir, "global_clump_input.txt")),
+  paste0("  全局 clump lead SNP: ", file.path(result_dir, "global_clump_leads.txt")),
+  paste0("  全局 clump 剔除 SNP: ", file.path(result_dir, "global_clump_removed.txt")),
+  paste0("  clump 前 MVMR 输入: ", file.path(result_dir, "pre_clump_mvmr_input.txt")),
   paste0("  MVMR 输入: ", file.path(result_dir, "mvmr_input.txt")),
   paste0("  MVMR IVW: ", file.path(result_dir, "mvmr_ivw.txt")),
   paste0("  MVMR 工具强度: ", file.path(result_dir, "mvmr_strength.txt")),
