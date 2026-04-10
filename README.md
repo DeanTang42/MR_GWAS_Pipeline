@@ -165,6 +165,7 @@ bash bin/format_tsmr.sh \
   --output data/exp/EXPO_exposure.csv \
   --role exposure \
   --phenotype EXPO \
+  --eaf-threshold 0.01 \
   --clump-r2 0.1 \
   --clump-kb 500 \
   --clump-p1 5e-8
@@ -176,8 +177,17 @@ bash bin/format_tsmr.sh \
 --region 1:55000000-56000000
 ```
 
+如果希望在 `exposure` 转换阶段剔除极低频或极高频位点，可以加：
+
+```bash
+--eaf-threshold 0.01
+```
+
+表示只保留 `0.01 <= EAF <= 0.99` 的位点。这个阈值只对 `role=exposure` 生效；`outcome` 会忽略它。设置了这个阈值后，`EAF` 仍为 `NA` 的行会被直接剔除；如果同时加了 `--use-maf-as-eaf`，则会优先使用填充后的 `EAF` 进行过滤。
+
 非 `--non-interactive` 模式下，`format_tsmr.sh` 会交互式询问：
 
+- `EAF` 过滤阈值，仅 exposure
 - `clump_r2`
 - `clump_kb`
 - `clump_p1`
@@ -190,6 +200,7 @@ bash bin/format_tsmr.sh \
 - `STANDARDIZED_OUTPUT_DIR`
 - `OUT_OUTPUT_DIR`
 - `EXP_OUTPUT_DIR`
+- `FORMAT_TSMR_EAF_THRESHOLD`
 
 ### 6. 运行 MR 分析
 

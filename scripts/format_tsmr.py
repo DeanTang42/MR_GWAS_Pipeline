@@ -51,6 +51,8 @@ DEFAULT_CLUMP_R2 = float(os.environ.get("MR_PIPELINE_CLUMP_R2", "0.1"))
 DEFAULT_CLUMP_KB = int(os.environ.get("MR_PIPELINE_CLUMP_KB", "500"))
 DEFAULT_CLUMP_P1 = float(os.environ.get("MR_PIPELINE_CLUMP_P1", "1e-4"))
 DEFAULT_CLUMP_POP = os.environ.get("MR_PIPELINE_CLUMP_POP", "EUR")
+DEFAULT_EAF_THRESHOLD_RAW = os.environ.get("MR_PIPELINE_FORMAT_EAF_THRESHOLD", "").strip()
+DEFAULT_EAF_THRESHOLD = DEFAULT_EAF_THRESHOLD_RAW if DEFAULT_EAF_THRESHOLD_RAW else None
 
 
 def _cancel_interaction() -> None:
@@ -113,6 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region-start", type=int, help="可选区域起点")
     parser.add_argument("--region-end", type=int, help="可选区域终点")
     parser.add_argument("--use-maf-as-eaf", action="store_true", help="当 EAF 缺失时用 MAF 填充 EAF")
+    parser.add_argument("--eaf-threshold", default=DEFAULT_EAF_THRESHOLD, help="仅 exposure 使用；按对称阈值过滤 EAF，保留 threshold <= EAF <= 1-threshold")
     parser.add_argument("--non-interactive", action="store_true", help="缺参数时直接报错，不进入交互")
     return parser.parse_args()
 
@@ -246,6 +249,15 @@ def parse_region(region: Optional[str], region_chr: Optional[str], region_start:
     return str(region_chr).replace("chr", "").replace("CHR", ""), int(region_start), int(region_end)
 
 
+def validate_eaf_threshold(eaf_threshold: Optional[float]) -> Optional[float]:
+    if eaf_threshold is None:
+        return None
+    eaf_threshold = float(eaf_threshold)
+    if not 0 <= eaf_threshold < 0.5:
+        raise ValueError("EAF 阈值必须满足 0 <= threshold < 0.5")
+    return eaf_threshold
+
+
 def interactive_fill(args: argparse.Namespace) -> argparse.Namespace:
     if not args.input:
         candidates = list_standardized_files()
@@ -275,6 +287,9 @@ def interactive_fill(args: argparse.Namespace) -> argparse.Namespace:
         args.sample_size = int(sample_size) if sample_size else None
 
     if role == "exposure":
+        if args.eaf_threshold is None:
+            eaf_threshold = ask_text("请输入 EAF 过滤阈值 (可留空，不过滤):", default="")
+            args.eaf_threshold = float(eaf_threshold) if eaf_threshold else None
         if not any([args.region, args.region_chr, args.region_start, args.region_end]):
             if ask_confirm("是否先按基因/染色体区域筛选后 clump?", default=False):
                 args.region = ask_text("请输入区域 (CHR:START-END):")
@@ -315,6 +330,8 @@ def build_command(args: argparse.Namespace, role: str, output: str, region: Opti
         cmd.extend(["--sample-size", str(args.sample_size)])
     if region:
         cmd.extend(["--region-chr", region[0], "--region-start", str(region[1]), "--region-end", str(region[2])])
+    if args.eaf_threshold is not None:
+        cmd.extend(["--eaf-threshold", str(args.eaf_threshold)])
     return cmd
 
 
@@ -330,6 +347,7 @@ def build_tsmr_lazyframe(
     use_maf_as_eaf: bool,
     region: Optional[Tuple[str, int, int]] = None,
     p_threshold: Optional[float] = None,
+    eaf_threshold: Optional[float] = None,
 ) -> pl.LazyFrame:
     schema = standardized_schema(input_path)
     required = {"BIM_ID", "VARIANT_ID", "CHR", "POS", "EFFECT_ALLELE", "OTHER_ALLELE", "BETA", "SE", "P"}
@@ -358,13 +376,22 @@ def build_tsmr_lazyframe(
     eaf_expr = pl.col("EAF").cast(pl.Float64, strict=False) if "EAF" in schema else pl.lit(None).cast(pl.Float64)
     if use_maf_as_eaf and "MAF" in schema:
         eaf_expr = pl.coalesce([eaf_expr, pl.col("MAF").cast(pl.Float64, strict=False)])
+    lf = lf.with_columns(eaf_expr.alias("__EAF_VALUE"))
+
+    if eaf_threshold is not None:
+        threshold = float(eaf_threshold)
+        lf = lf.filter(
+            pl.col("__EAF_VALUE").is_not_null()
+            & (pl.col("__EAF_VALUE") >= threshold)
+            & (pl.col("__EAF_VALUE") <= (1.0 - threshold))
+        )
 
     role_label = "exposure" if role == "exposure" else "outcome"
     out_cols = [
         pl.col("BIM_ID").cast(pl.Utf8).str.to_uppercase().alias("SNP"),
         pl.col("EFFECT_ALLELE").cast(pl.Utf8).str.to_uppercase().alias(f"effect_allele.{role_label}"),
         pl.col("OTHER_ALLELE").cast(pl.Utf8).str.to_uppercase().alias(f"other_allele.{role_label}"),
-        eaf_expr.alias(f"eaf.{role_label}"),
+        pl.col("__EAF_VALUE").alias(f"eaf.{role_label}"),
         pl.col("BETA").cast(pl.Float64, strict=False).alias(f"beta.{role_label}"),
         pl.col("SE").cast(pl.Float64, strict=False).alias(f"se.{role_label}"),
         pl.col("P").cast(pl.Float64, strict=False).alias(f"pval.{role_label}"),
@@ -470,6 +497,7 @@ def convert_standardized(args: argparse.Namespace, role: str, output: str, regio
             sample_size=args.sample_size,
             use_maf_as_eaf=args.use_maf_as_eaf,
             region=None,
+            eaf_threshold=args.eaf_threshold,
         )
         sink_csv(lf, output)
         return
@@ -483,6 +511,7 @@ def convert_standardized(args: argparse.Namespace, role: str, output: str, regio
         use_maf_as_eaf=args.use_maf_as_eaf,
         region=region,
         p_threshold=args.clump_p1,
+        eaf_threshold=args.eaf_threshold,
     )
     with tempfile.TemporaryDirectory(prefix="format_tsmr_candidates_") as tmp_dir:
         candidates_path = str(Path(tmp_dir) / "candidates.csv")
@@ -514,6 +543,14 @@ def main() -> None:
 
     role = normalize_role(args.role)
     region = parse_region(args.region, args.region_chr, args.region_start, args.region_end)
+    try:
+        args.eaf_threshold = validate_eaf_threshold(args.eaf_threshold)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(1)
+    if role == "outcome" and args.eaf_threshold is not None:
+        console.print("[yellow]已忽略 --eaf-threshold：EAF 过滤仅在 exposure 转换时生效。[/yellow]")
+        args.eaf_threshold = None
     if region and role != "exposure":
         console.print("[red]区域筛选/clump 只建议用于 exposure；outcome 不支持区域参数。[/red]")
         sys.exit(1)
@@ -526,6 +563,8 @@ def main() -> None:
     console.print(f"输出文件: [green]{output}[/green]")
     if region:
         console.print(f"区域筛选: [green]{region[0]}:{region[1]}-{region[2]}[/green]")
+    if args.eaf_threshold is not None:
+        console.print(f"EAF 过滤: [green]{args.eaf_threshold:g} <= EAF <= {1 - args.eaf_threshold:g}[/green]")
 
     try:
         convert_standardized(args, role, output, region)
