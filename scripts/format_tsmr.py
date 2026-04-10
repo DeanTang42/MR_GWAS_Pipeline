@@ -287,9 +287,9 @@ def interactive_fill(args: argparse.Namespace) -> argparse.Namespace:
         args.sample_size = int(sample_size) if sample_size else None
 
     if role == "exposure":
-        if args.eaf_threshold is None:
-            eaf_threshold = ask_text("请输入 EAF 过滤阈值 (可留空，不过滤):", default="")
-            args.eaf_threshold = float(eaf_threshold) if eaf_threshold else None
+        eaf_default = "" if args.eaf_threshold is None else str(args.eaf_threshold)
+        eaf_threshold = ask_text("请输入 EAF 过滤阈值 (可留空，不过滤):", default=eaf_default)
+        args.eaf_threshold = float(eaf_threshold) if eaf_threshold else None
         if not any([args.region, args.region_chr, args.region_start, args.region_end]):
             if ask_confirm("是否先按基因/染色体区域筛选后 clump?", default=False):
                 args.region = ask_text("请输入区域 (CHR:START-END):")

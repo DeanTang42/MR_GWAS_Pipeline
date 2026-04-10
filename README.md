@@ -202,6 +202,8 @@ bash bin/format_tsmr.sh \
 - `EXP_OUTPUT_DIR`
 - `FORMAT_TSMR_EAF_THRESHOLD`
 
+其中 `FORMAT_TSMR_EAF_THRESHOLD` 只作为默认值使用；在交互式 `exposure` 转换时，脚本仍会每次询问一次，允许你临时修改或留空。
+
 ### 6. 运行 MR 分析
 
 将 `EXP_OUTPUT_DIR` 和 `OUT_OUTPUT_DIR` 对应目录中的文件准备好之后，运行：
